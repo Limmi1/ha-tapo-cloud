@@ -24,25 +24,22 @@ A camera at another house, on someone else's broadband, behind a router you don'
 
 ## How it works
 
-Neither the camera nor Home Assistant accepts incoming connections. Both connect **out** to TP-Link's cloud, and the cloud's media relay passes video between them. That's why the camera can be on any network.
+Video travels from the camera, through TP-Link's cloud, to Home Assistant. Neither end accepts incoming connections: both connect **out** to the cloud, which is why the camera can be on any network and no ports need opening.
 
 ```mermaid
 flowchart LR
-    subgraph site["Camera's site · any network"]
-        cam["Tapo camera"]
-    end
+    cam["Tapo camera<br/>on any network"]
     subgraph cloud["TP-Link cloud"]
-        api["Account and device API"]
+        direction TB
         relay["Media relay"]
+        api["Account and<br/>device API"]
     end
-    subgraph home["Your home"]
-        ha["Home Assistant<br/>Tapo Cloud integration"]
-        dash["Dashboards<br/>and automations"]
-    end
-    cam -- "connects out" --> api
-    cam -- "connects out" --> relay
-    ha -- "sign-in · discovery · pan/tilt · state" --> api
-    ha -- "live video" --> relay
+    ha["Home Assistant<br/>Tapo Cloud integration"]
+    dash["Your dashboards<br/>and automations"]
+    cam -- "video" --> relay
+    cam <-- "state · motor" --> api
+    relay -- "live video" --> ha
+    api <-- "sign-in · discovery · pan/tilt" --> ha
     ha --> dash
 ```
 
