@@ -200,17 +200,23 @@ TOKEN_REFRESH_MIN_INTERVAL = 300.0
 LENS_POLL_SHARE_SECONDS = 60.0
 
 
-async def decode_first_frame(video: bytes, *, ffmpeg: str = "ffmpeg") -> bytes:
+async def decode_first_frame(
+    video: bytes, *, ffmpeg: str = "ffmpeg", video_stream: int = 0
+) -> bytes:
     """Decode the first video frame of an MPEG-TS buffer to JPEG bytes.
 
     Uses pipes for both input and output, so nothing touches the filesystem.
-    Raises ``RuntimeError`` if ffmpeg is missing or produces no image.
+    ``video_stream`` picks which video stream to decode when the buffer holds
+    more than one. Raises ``RuntimeError`` if ffmpeg is missing or produces no
+    image.
     """
+    select = ("-map", f"0:v:{int(video_stream)}") if video_stream else ()
     try:
         process = await asyncio.create_subprocess_exec(
             ffmpeg,
             "-hide_banner", "-loglevel", "error",
             "-f", "mpegts", "-i", "pipe:0",
+            *select,
             "-frames:v", "1", "-q:v", "3",
             "-f", "image2", "-c:v", "mjpeg", "pipe:1",
             stdin=asyncio.subprocess.PIPE,

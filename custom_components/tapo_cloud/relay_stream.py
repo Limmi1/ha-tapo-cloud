@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 
 from ontapo import RelayError
-from ontapo.relay import StreamType, request_relay
+from ontapo.relay import RelayParams, StreamType, request_relay
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -93,20 +95,56 @@ async def iter_live_ts(
         RelayError: negotiation failed, the relay refused, or the stream ended
             before producing any video.
     """
-    from ontapo import stream as _s
-
-    assert_ontapo_compatible()
-    gap = _s._IDLE_GAP if idle_timeout is None else idle_timeout
-
     channel = int(channel)
     # Channel 0 must be byte-for-byte the request OnTapo's own live view makes:
     # same track id, relay URL untouched. Live testing showed that altering
     # either (0.1.2 appended ``channel=`` to the signed relay URL and renamed
     # the track) makes the relay answer 401. Another lens differs only in its
     # track id, so two lenses never share a session, and in the
-    # ``"channels":[n]`` control frame below, which is what selects the lens.
+    # ``"channels":[n]`` control frame, which is what selects the lens.
     track_id = f"preview-{device_id}" if channel == 0 else f"preview-{device_id}-ch{channel}"
+    # aclosing: when the consumer stops early (a dashboard card closes), the
+    # inner session must close its relay socket now, not at garbage collection.
+    async with contextlib.aclosing(
+        iter_relay_ts(
+            session,
+            device_id,
+            track_id=track_id,
+            channels=[channel],
+            resolution=resolution,
+            idle_timeout=idle_timeout,
+        )
+    ) as stream:
+        async for chunk in stream:
+            yield chunk
+
+
+async def iter_relay_ts(
+    session: object,
+    device_id: str,
+    *,
+    track_id: str,
+    channels: list[int],
+    resolution: str = "HD",
+    relay_url: Callable[[RelayParams], str] | None = None,
+    idle_timeout: float | None = None,
+) -> AsyncIterator[bytes]:
+    """The relay session itself, with every request detail explicit.
+
+    :func:`iter_live_ts` is the normal entry point. This exists so the lens
+    probe can try request variants (a different track name, channel list or
+    relay path) without duplicating the protocol. ``relay_url``, if given,
+    maps the cloud's relay parameters to the URL to connect to instead of the
+    cloud's own ``relayUrl``; the ``X-token`` authorisation is unchanged.
+    """
+    from ontapo import stream as _s
+
+    assert_ontapo_compatible()
+    gap = _s._IDLE_GAP if idle_timeout is None else idle_timeout
+
     relay = await request_relay(session, device_id, StreamType.PREVIEW, track_id)
+    if relay_url is not None:
+        relay = replace(relay, relay_url=relay_url(relay))
     terminal_uuid = session.terminal_uuid  # type: ignore[attr-defined]
 
     reader, writer, host, req_path = await _s._open_relay(relay, terminal_uuid, track_id)
@@ -114,7 +152,7 @@ async def iter_live_ts(
         writer.write(_s._relay_head(relay, terminal_uuid, track_id, req_path, host).encode())
         preview_req = (
             '{"type":"request","seq":1,"params":{"preview":'
-            f'{{"audio":["default"],"channels":[{channel}],"resolutions":["{resolution}"]}},'
+            f'{{"audio":["default"],"channels":{json.dumps(channels, separators=(",", ":"))},"resolutions":["{resolution}"]}},'
             '"method":"get"}}'
         )
         writer.write(_s._control_frame(preview_req))

@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import voluptuous as vol
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+    callback,
+)
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
@@ -23,6 +30,8 @@ from .const import (
 )
 from .coordinator import TapoCloudCoordinator
 
+SERVICE_PROBE_LENSES = "probe_lenses"
+
 _LOGGER = logging.getLogger(__name__)
 
 _MOVE_SCHEMA = vol.Schema(
@@ -38,6 +47,8 @@ _PRESET_SCHEMA = vol.Schema(
         vol.Required(ATTR_PRESET): cv.string,
     }
 )
+
+_PROBE_SCHEMA = vol.Schema({vol.Optional("entity_id"): cv.entity_ids})
 
 _PRIVACY_SCHEMA = vol.Schema(
     {
@@ -117,6 +128,67 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN, SERVICE_SET_PRIVACY_MODE, handle_privacy, schema=_PRIVACY_SCHEMA
     )
 
+    async def handle_probe(call: ServiceCall) -> ServiceResponse:
+        """Diagnostic: find which relay request delivers each extra lens."""
+        from homeassistant.components.ffmpeg import get_ffmpeg_manager
+
+        from .probe import probe_channel
+
+        lenses = [
+            coordinator
+            for data in hass.data.get(DOMAIN, {}).values()
+            for coordinator in data.coordinators.values()
+            if coordinator.info.is_lens and coordinator.info.channel > 0
+        ]
+        if "entity_id" in call.data:
+            wanted = {c.info.device_id for c in _coordinators_for(hass, call)}
+            lenses = [c for c in lenses if c.info.device_id in wanted]
+        seen: set[tuple[str, int]] = set()
+        targets = []
+        for coordinator in lenses:
+            key = (coordinator.info.stream_device_id, coordinator.info.channel)
+            if key not in seen:
+                seen.add(key)
+                targets.append(coordinator)
+        if not targets:
+            raise ServiceValidationError(
+                "No multi-lens camera with a second lens was found to probe"
+            )
+
+        ffmpeg = get_ffmpeg_manager(hass).binary
+        save_dir = Path(hass.config.path("www", "tapo_probe"))
+        results = []
+        for coordinator in targets:
+            info = coordinator.info
+            for result in await probe_channel(
+                hass,
+                coordinator.account.session,
+                info.stream_device_id,
+                info.channel,
+                ffmpeg=ffmpeg,
+                save_dir=save_dir,
+            ):
+                result["camera"] = info.name
+                _LOGGER.warning(
+                    "Tapo lens probe | %s | %s | %s%s",
+                    info.name,
+                    result["variant"],
+                    result["outcome"],
+                    f" (difference {result['difference']}, {result['size']})"
+                    if "difference" in result
+                    else "",
+                )
+                results.append(result)
+        return {"results": results}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PROBE_LENSES,
+        handle_probe,
+        schema=_PROBE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
 
 @callback
 def async_unload_services(hass: HomeAssistant) -> None:
@@ -126,5 +198,6 @@ def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_TILT,
         SERVICE_MOVE_TO_PRESET,
         SERVICE_SET_PRIVACY_MODE,
+        SERVICE_PROBE_LENSES,
     ):
         hass.services.async_remove(DOMAIN, service)

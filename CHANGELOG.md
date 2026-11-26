@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.4] - 2026-11-26
+
+### Added
+
+- Temporary diagnostic service `tapo_cloud.probe_lenses` for multi-lens
+  cameras. For each extra lens it tries every candidate way of asking the
+  relay for that lens, one at a time, compares each picture with lens 0, and
+  reports which request (if any) delivers the other lens. Results are returned
+  by the service and logged, and the pictures are saved under
+  `/config/www/tapo_probe/`. It will be removed once the right request is
+  known.
+
+### Changed
+
+- The relay session is now a lower-level function with the track name,
+  channel list and relay path as parameters. Normal streaming sends exactly
+  the same request as 0.1.3.
+- Stopping a live stream early closes its relay connection immediately.
+
 ## [0.1.3] - 2026-11-26
 
 ### Fixed
@@ -88,6 +107,7 @@ All notable changes to this project are documented here. The format follows
   and the server reports refusals as HTTP 200, which looked like success.
 - Codes typed with a separator, such as `150-791`, were rejected.
 
+[0.1.4]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.4
 [0.1.3]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.3
 [0.1.2]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.1
