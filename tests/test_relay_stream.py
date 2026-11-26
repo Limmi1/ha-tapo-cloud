@@ -111,7 +111,7 @@ async def test_requests_the_preview_stream_type(fake_relay):
     device_id, stream_type, track_id = fake_relay["requested"]
     assert device_id == "DEV1"
     assert stream_type == 0  # StreamType.PREVIEW — live, not playback
-    assert track_id == "ha-preview-DEV1-ch0"
+    assert track_id == "preview-DEV1"
 
 
 async def test_control_frame_asks_for_the_requested_resolution(fake_relay):
@@ -188,36 +188,28 @@ async def test_the_default_channel_is_zero(fake_relay):
     assert b'"channels":[0]' in fake_relay["writer"].written
 
 
-async def test_the_request_path_carries_the_channel(fake_relay):
+async def test_the_relay_url_is_never_altered(fake_relay):
+    """0.1.2 appended channel= to the signed relay URL and the relay answered 401."""
+    for channel in (0, 1):
+        fake_relay["parts"] = [("video/mp2t", b"\x47x")]
+        await _collect(channel=channel)
+        assert fake_relay["opened_relay"] is RELAY
+
+
+async def test_channel_zero_matches_ontapos_own_live_view_request(fake_relay):
+    """The request proven to work live: OnTapo's track id, channels [0]."""
     fake_relay["parts"] = [("video/mp2t", b"\x47x")]
-    await _collect(channel=1)
-    assert fake_relay["opened_relay"].relay_url == (
-        "https://relay.example.com/relayservice?route=xyz&channel=1"
-    )
+    await _collect()
+    assert fake_relay["opened_track"] == "preview-DEV1"  # as ontapo.Device.live_preview
+    assert fake_relay["requested"][2] == "preview-DEV1"
+    assert b'"channels":[0]' in fake_relay["writer"].written
 
 
 async def test_two_lenses_get_separate_tracks(fake_relay):
-    """Lenses share a parent device id, so the track id must include the channel."""
+    """Lenses share a parent device id, so another lens's track adds its channel."""
     fake_relay["parts"] = [("video/mp2t", b"\x47x")]
     await _collect(channel=0)
-    first = fake_relay["opened_track"]
+    assert fake_relay["opened_track"] == "preview-DEV1"
     fake_relay["parts"] = [("video/mp2t", b"\x47x")]
     await _collect(channel=1)
-    assert first != fake_relay["opened_track"]
-    assert fake_relay["opened_track"] == "ha-preview-DEV1-ch1"
-
-
-@pytest.mark.parametrize(
-    ("url", "expected"),
-    [
-        ("https://r.example/relayservice?route=xyz", "https://r.example/relayservice?route=xyz&channel=1"),
-        ("https://r.example/relayservice", "https://r.example/relayservice?channel=1"),
-        ("https://r.example/relayservice?", "https://r.example/relayservice?channel=1"),
-        # An existing channel is left exactly as the cloud sent it.
-        ("https://r.example/relayservice?channel=0&route=x", "https://r.example/relayservice?channel=0&route=x"),
-    ],
-)
-def test_with_channel(url, expected):
-    from custom_components.tapo_cloud.relay_stream import with_channel
-
-    assert with_channel(url, 1) == expected
+    assert fake_relay["opened_track"] == "preview-DEV1-ch1"

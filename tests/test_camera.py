@@ -104,6 +104,32 @@ async def test_an_auth_refusal_also_serves_the_last_good_frame(
     assert (await async_get_image(hass, "camera.garden")).content == JPEG
 
 
+async def test_snapshot_failures_are_logged_visibly_once_then_recovery(
+    hass: HomeAssistant, entry_data, mock_account, ptz_camera_info, caplog
+):
+    """A failing camera warns once (not only at debug), then notes recovery."""
+    import contextlib
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="custom_components.tapo_cloud.camera")
+    await _setup(hass, entry_data, mock_account, options={CONF_SNAPSHOT_INTERVAL: 0})
+    camera = mock_account.cameras[ptz_camera_info.device_id]
+
+    camera.async_snapshot = AsyncMock(side_effect=CloudTransportError("relay preview HTTP 401"))
+    for _ in range(3):
+        # No good frame yet, so Home Assistant raises; only the logging matters.
+        with contextlib.suppress(Exception):
+            await async_get_image(hass, "camera.garden")
+
+    failures = [r for r in caplog.records if "Snapshot failed" in r.getMessage()]
+    assert [r.levelno for r in failures] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    assert "relay preview HTTP 401" in failures[0].getMessage()
+
+    _writes_jpeg(mock_account, ptz_camera_info.device_id)
+    await async_get_image(hass, "camera.garden")
+    assert any("working again" in r.getMessage() and r.levelno == logging.INFO for r in caplog.records)
+
+
 async def test_snapshot_uses_ha_ffmpeg_and_the_configured_quality(
     hass: HomeAssistant, entry_data, mock_account, ptz_camera_info
 ):

@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-11-26
+
+### Fixed
+
+- **No camera pictures at all in 0.1.2.** 0.1.2 added `channel=` to the
+  relay's signed address and renamed the relay track, and TP-Link's relay
+  rejected every stream with HTTP 401, including ordinary single-lens
+  cameras. Channel 0 now sends exactly the request that worked in 0.1.1. A
+  lens other than the first differs only in its track name and in the
+  `"channels":[n]` control message that selects it.
+
+### Changed
+
+- Snapshot failures now log a warning the first time a camera starts failing,
+  and a note when it recovers. Before, they were only visible with debug
+  logging on.
+
 ## [0.1.2] - 2026-11-26
 
 ### Fixed
@@ -71,6 +88,7 @@ All notable changes to this project are documented here. The format follows
   and the server reports refusals as HTTP 200, which looked like success.
 - Codes typed with a separator, such as `150-791`, were rejected.
 
+[0.1.3]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.3
 [0.1.2]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.0

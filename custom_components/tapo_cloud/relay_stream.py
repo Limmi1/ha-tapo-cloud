@@ -21,7 +21,6 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import replace
 
 from ontapo import RelayError
 from ontapo.relay import StreamType, request_relay
@@ -66,23 +65,6 @@ def assert_ontapo_compatible() -> None:
         )
 
 
-def with_channel(relay_url: str, channel: int) -> str:
-    """Add ``channel=<n>`` to a relay URL's query unless it already has one.
-
-    The Tapo app requests ``/relayservice?deviceid=…&type=…&resolution=…&channel=%d``
-    and picks a multi-lens camera's lens by channel on the parent device. The
-    cloud's ``relayUrl`` carries an opaque routing query; this keeps that query
-    as-is and only appends the channel when it is absent.
-    """
-    from urllib.parse import parse_qs, urlparse
-
-    parsed = urlparse(relay_url)
-    if "channel" in parse_qs(parsed.query, keep_blank_values=True):
-        return relay_url
-    separator = "&" if parsed.query else ("" if relay_url.endswith("?") else "?")
-    return f"{relay_url}{separator}channel={int(channel)}"
-
-
 async def iter_live_ts(
     session: object,
     device_id: str,
@@ -117,11 +99,14 @@ async def iter_live_ts(
     gap = _s._IDLE_GAP if idle_timeout is None else idle_timeout
 
     channel = int(channel)
-    # One track per (device, channel), so two lenses of one camera never share
-    # a relay session.
-    track_id = f"ha-preview-{device_id}-ch{channel}"
+    # Channel 0 must be byte-for-byte the request OnTapo's own live view makes:
+    # same track id, relay URL untouched. Live testing showed that altering
+    # either (0.1.2 appended ``channel=`` to the signed relay URL and renamed
+    # the track) makes the relay answer 401. Another lens differs only in its
+    # track id, so two lenses never share a session, and in the
+    # ``"channels":[n]`` control frame below, which is what selects the lens.
+    track_id = f"preview-{device_id}" if channel == 0 else f"preview-{device_id}-ch{channel}"
     relay = await request_relay(session, device_id, StreamType.PREVIEW, track_id)
-    relay = replace(relay, relay_url=with_channel(relay.relay_url, channel))
     terminal_uuid = session.terminal_uuid  # type: ignore[attr-defined]
 
     reader, writer, host, req_path = await _s._open_relay(relay, terminal_uuid, track_id)

@@ -87,6 +87,7 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
         self._snapshot: bytes | None = None
         self._snapshot_at: float = 0.0
         self._snapshot_lock = asyncio.Lock()
+        self._snapshot_failing = False
 
     @property
     def _resolution(self) -> str:
@@ -117,12 +118,17 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
             try:
                 image = await self._async_decode_snapshot()
             except (CloudAuthError, CloudTransportError, OnTapoError, RuntimeError) as err:
-                _LOGGER.debug(
-                    "snapshot failed for %s: %s", self.coordinator.info.device_id, err
-                )
+                # Warn when snapshots start failing, so it shows in the normal
+                # log; repeats go to debug so a dead camera doesn't flood it.
+                log = _LOGGER.debug if self._snapshot_failing else _LOGGER.warning
+                log("Snapshot failed for %s: %s", self.name or self.entity_id, err)
+                self._snapshot_failing = True
                 # Serve the stale frame rather than a broken-image icon.
                 return self._snapshot
 
+            if self._snapshot_failing:
+                _LOGGER.info("Snapshots working again for %s", self.name or self.entity_id)
+                self._snapshot_failing = False
             self._snapshot = image
             self._snapshot_at = time.monotonic()
             return image
