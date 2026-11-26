@@ -50,13 +50,3 @@ set_privacy_mode:
       required: true
       selector:
         boolean:
-
-probe_lenses:
-  fields:
-    entity_id:
-      required: false
-      selector:
-        entity:
-          integration: tapo_cloud
-          domain: camera
-          multiple: true

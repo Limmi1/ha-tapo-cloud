@@ -175,11 +175,13 @@ def test_compatibility_guard_fails_on_a_missing_internal(monkeypatch):
         assert_ontapo_compatible()
 
 
-async def test_the_control_frame_asks_for_the_requested_channel(fake_relay):
+async def test_another_lens_asks_for_both_channels_on_its_own_track(fake_relay):
+    """The request verified live by the 0.1.4 lens probe: "channels":[0,1]."""
     fake_relay["parts"] = [("video/mp2t", b"\x47x")]
     await _collect(channel=1)
-    assert b'"channels":[1]' in fake_relay["writer"].written
-    assert b'"channels":[0]' not in fake_relay["writer"].written
+    assert b'"channels":[0,1]' in fake_relay["writer"].written
+    assert fake_relay["opened_track"] == "preview-DEV1-ch1"
+    assert fake_relay["opened_relay"] is RELAY
 
 
 async def test_the_default_channel_is_zero(fake_relay):

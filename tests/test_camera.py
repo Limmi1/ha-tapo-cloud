@@ -301,3 +301,14 @@ async def test_the_mjpeg_endpoint_streams_ffmpeg_output_to_the_client(
     assert written == [b"--frame\r\n", b"\xff\xd8image\xff\xd9"]
     assert "multipart/x-mixed-replace" in response.headers["Content-Type"]
     assert killed == [True]
+
+
+def test_live_view_transcodes_the_lens_own_video_stream():
+    """Each lens is its own video stream; ffmpeg must map the right one."""
+    from custom_components.tapo_cloud.camera import _ffmpeg_args
+
+    for stream in (0, 1):
+        args = _ffmpeg_args(stream)
+        assert args[args.index("-map") + 1] == f"0:v:{stream}"
+        # The map comes after the input it refers to.
+        assert args.index("-map") > args.index("pipe:0")

@@ -613,7 +613,10 @@ class TapoCloudCamera:
                 video = await self._collect_ts(seconds, resolution, max_wait)
             except Exception as retry_err:  # noqa: BLE001
                 raise _map_error(retry_err) from retry_err
-        return await decode_first_frame(video, ffmpeg=ffmpeg)
+        # Every lens arrives as its own video stream, in lens order.
+        return await decode_first_frame(
+            video, ffmpeg=ffmpeg, video_stream=self._info.channel
+        )
 
     async def _collect_ts(self, seconds: float, resolution: str, max_wait: float) -> bytes:
         """Gather ``seconds`` of live video, timed from the first chunk."""

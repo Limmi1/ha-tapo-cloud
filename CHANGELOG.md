@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.5] - 2026-11-26
+
+### Fixed
+
+- **The second lens of a dual-lens camera showed the first lens's picture.**
+  The 0.1.4 lens probe showed that the relay sends every lens in a single
+  stream, as separate video streams in lens order, and that the relay ignores
+  a request for one lens alone. Snapshots and live view now decode the lens's
+  own video stream: stream 0 for an ordinary camera or the first lens, stream
+  1 for the second lens, and so on.
+
+### Removed
+
+- The temporary `tapo_cloud.probe_lenses` diagnostic service from 0.1.4. It
+  also showed that a relay address built the way the Tapo app formats it is
+  refused (HTTP 401), so that approach is ruled out.
+
 ## [0.1.4] - 2026-11-26
 
 ### Added
@@ -107,6 +124,7 @@ All notable changes to this project are documented here. The format follows
   and the server reports refusals as HTTP 200, which looked like success.
 - Codes typed with a separator, such as `150-791`, were rejected.
 
+[0.1.5]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.5
 [0.1.4]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.4
 [0.1.3]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.3
 [0.1.2]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.2

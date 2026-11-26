@@ -53,6 +53,7 @@ _FFMPEG_ARGS = (
     "-probesize", "1000000",
     "-f", "mpegts",
     "-i", "pipe:0",
+    "-map", "0:v:{stream}",  # the lens's own video stream; see relay_stream
     "-an",
     "-f", "mpjpeg",
     "-q:v", "6",
@@ -167,7 +168,7 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
 
         process = await asyncio.create_subprocess_exec(
             ffmpeg,
-            *_FFMPEG_ARGS,
+            *_ffmpeg_args(self.coordinator.info.channel),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -222,3 +223,9 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
         finally:
             with contextlib.suppress(Exception):
                 stdin.close()
+
+
+def _ffmpeg_args(stream: int) -> tuple[str, ...]:
+    """ffmpeg arguments that transcode video stream ``stream`` to MJPEG."""
+    return tuple(arg.format(stream=int(stream)) for arg in _FFMPEG_ARGS)
+

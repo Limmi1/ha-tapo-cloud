@@ -430,7 +430,19 @@ async def test_a_lens_snapshot_streams_the_parent_on_the_lens_channel():
 
     assert image == b"JPEG"
     assert calls == [{"device_id": PARENT, "channel": 1, "resolution": "VGA"}]
-    decode.assert_awaited_once_with(b"\x47ts", ffmpeg="/opt/ffmpeg")
+    # Lens 1 is the second video stream in the relay's MPEG-TS.
+    decode.assert_awaited_once_with(b"\x47ts", ffmpeg="/opt/ffmpeg", video_stream=1)
+
+
+async def test_a_plain_camera_snapshot_decodes_the_first_stream():
+    fake, _ = _stream_of(b"\x47ts")
+    camera = TapoCloudAccount(MagicMock()).camera(_parent_info())
+    with (
+        patch(f"{API}.iter_live_ts", fake),
+        patch(f"{API}.decode_first_frame", AsyncMock(return_value=b"J")) as decode,
+    ):
+        await camera.async_snapshot(seconds=0)
+    assert decode.await_args.kwargs["video_stream"] == 0
 
 
 async def test_snapshot_collects_seconds_of_video_before_decoding():
@@ -575,3 +587,32 @@ async def test_decode_first_frame_with_real_ffmpeg():
 async def test_decode_first_frame_reports_a_missing_ffmpeg():
     with pytest.raises(RuntimeError, match="ffmpeg not found"):
         await decode_first_frame(b"x", ffmpeg="/nonexistent/ffmpeg")
+
+
+async def test_decode_picks_the_requested_video_stream_with_real_ffmpeg():
+    """A multi-lens stream carries each lens as its own video stream."""
+    import io
+    import shutil
+
+    from PIL import Image
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg not installed")
+    make = await asyncio.create_subprocess_exec(
+        ffmpeg, "-loglevel", "error",
+        "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
+        "-f", "lavfi", "-i", "color=c=red:size=160x90:rate=10",
+        "-t", "1", "-map", "0:v", "-map", "1:v", "-c:v", "libx264", "-f", "mpegts", "pipe:1",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    ts, _ = await make.communicate()
+    if make.returncode != 0 or not ts:
+        pytest.skip("this ffmpeg cannot build a two-stream test file")
+
+    first = await decode_first_frame(ts, ffmpeg=ffmpeg)
+    second = await decode_first_frame(ts, ffmpeg=ffmpeg, video_stream=1)
+    with Image.open(io.BytesIO(first)) as image:
+        assert image.size == (320, 240)
+    with Image.open(io.BytesIO(second)) as image:
+        assert image.size == (160, 90)
