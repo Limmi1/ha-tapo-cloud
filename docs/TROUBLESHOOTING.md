@@ -27,7 +27,9 @@ flowchart TD
     log -- "relay request failed" --> region["Try another relay region<br/>in the options"]
     log -- "ffmpeg …" --> ff["ffmpeg missing or broken:<br/>see below"]
     log -- "nothing at all" --> dbg["Turn on debug logging,<br/>then open the dashboard"]
-``` Diagnostics (**Devices & Services → Tapo Cloud → ⋮ → Download
+```
+
+Diagnostics (**Devices & Services → Tapo Cloud → ⋮ → Download
 diagnostics**) redact the token, refresh token, email and device ids.
 
 ---
