@@ -1,133 +1,184 @@
 # Architecture
 
-The integration is deliberately split so the cloud transport is separable from
-the Home Assistant entity layer. The goal is that the transport could be
-contributed to
+The integration is split so the cloud transport is separable from the Home
+Assistant entity layer. The transport could be contributed to
 [HomeAssistant-Tapo-Control](https://github.com/JurajNyiri/HomeAssistant-Tapo-Control)
-as an optional *cloud connection mode* alongside its existing local (pytapo)
-mode, without dragging any of this repository's entity code along.
+as an optional *cloud connection mode* alongside its local (pytapo) mode,
+without bringing any of this repository's entity code along.
 
 ## Layers
 
+```mermaid
+flowchart TB
+    subgraph ha["Home Assistant layer · replaceable"]
+        direction LR
+        camera["camera.py<br/>tiles and live view"]
+        sensors["binary_sensor.py<br/>switch.py"]
+        services["services.py<br/>pan · tilt · presets"]
+        flow["config_flow.py<br/>diagnostics.py"]
+    end
+    coord["coordinator.py<br/>polling · reconnection"]
+    subgraph transport["Cloud connection mode · no Home Assistant imports"]
+        direction LR
+        api["api.py<br/>account · cameras · errors"]
+        relay["relay_stream.py<br/>live MPEG-TS"]
+        parsers["parsers.py<br/>replies to state"]
+    end
+    ontapo["OnTapo 0.1.0<br/>cloud protocol, reused not rewritten"]
+
+    ha --> coord --> transport --> ontapo
 ```
-            Home Assistant
-  ┌──────────────────────────────────┐
-  │ camera.py  binary_sensor.py      │  entity layer
-  │ switch.py  services.py           │  — HA-specific, replaceable
-  │ config_flow.py  diagnostics.py   │
-  └───────────────┬──────────────────┘
-                  │  CameraInfo / TapoCloudCamera
-  ┌───────────────▼──────────────────┐
-  │ coordinator.py                   │  polling + reconnection
-  └───────────────┬──────────────────┘
-                  │
-  ┌───────────────▼──────────────────┐
-  │ api.py                           │  ◄── the connection mode
-  │ parsers.py   relay_stream.py     │      no HA imports
-  └───────────────┬──────────────────┘
-                  │
-  ┌───────────────▼──────────────────┐
-  │ ontapo 0.1.0                     │  cloud protocol (reused, not rewritten)
-  └──────────────────────────────────┘
-```
 
-## The transport boundary
+`api.py`, `parsers.py` and `relay_stream.py` **import no Home Assistant code**,
+and their tests run without it. Together they are the whole cloud connection
+mode:
 
-`api.py`, `parsers.py` and `relay_stream.py` **import no Home Assistant code at
-all**, and that is enforced by them being unit-tested without it. Together they
-are the whole cloud connection mode:
-
-- **`TapoCloudAccount`** — login (with MFA), token persistence and renewal,
-  camera discovery. Yields `CameraInfo` records.
-- **`TapoCloudCamera`** — per-camera operations: `iter_live_ts()`,
+- **`TapoCloudAccount`**: sign-in (with MFA), token renewal, camera discovery
+  including [lens mapping](#multi-lens-cameras). Yields `CameraInfo` records.
+- **`TapoCloudCamera`**: one camera or lens: `iter_live_ts()`,
   `async_snapshot()`, `async_poll()`, pan/tilt/preset, attempted setters.
-- **`parsers.py`** — pure functions turning raw device replies into state,
-  tolerant of the per-model nesting differences.
-- **`relay_stream.py`** — continuous live MPEG-TS (see below).
+- **`parsers.py`**: pure functions turning raw device replies into state,
+  tolerant of how differently models nest their answers.
+- **`relay_stream.py`**: the relay session itself, as an async generator.
 
-Errors are translated into a transport-neutral vocabulary at this boundary —
-`CloudAuthError`, `CloudTransportError`, `CloudSetterRejected` — so the entity
+Errors are translated at this boundary into a transport-neutral vocabulary
+(`CloudAuthError`, `CloudTransportError`, `CloudSetterRejected`), so the entity
 layer never catches an OnTapo-specific exception. A local connection mode
-raising the same four exceptions would slot in behind the same coordinator
-unchanged.
+raising the same exceptions would slot in behind the same coordinator.
 
-To contribute this upstream, the three transport modules move across and the
-entity layer is discarded in favour of the host project's own.
+## Live video
 
-## Why `relay_stream.py` exists
+The relay delivers MPEG-TS over a TLS socket we hold open ourselves. Home
+Assistant's `stream` component needs a URL to hand to go2rtc, and the relay
+offers none, so live view is served the way HA serves any push-only source:
+transcoded to multipart MJPEG by ffmpeg.
 
-OnTapo's public `stream_preview()` records a *fixed number of seconds to a file
-path*. Home Assistant needs an open-ended byte stream for as long as a card is
-on screen.
+```mermaid
+flowchart LR
+    relay["TP-Link relay<br/>TLS socket"] -- "MPEG-TS parts" --> gen["relay_stream<br/>iter_live_ts"]
+    gen -- "stdin" --> ff["ffmpeg<br/>maps video stream n<br/>to MJPEG"]
+    ff -- "stdout" --> resp["HA HTTP response"]
+    resp --> ui["Camera pop-up<br/>or live card"]
+```
 
-Three options were considered:
+The relay session, the ffmpeg process and the HTTP response are torn down
+together: whichever goes away first (closing the pop-up, a relay drop, ffmpeg
+exiting) stops the other two.
 
-1. **Re-implement the relay protocol.** Rejected: the explicit brief was to
-   reuse OnTapo rather than reverse-engineer the protocol again, and its
-   negotiation, framing and error mapping are the valuable part.
-2. **Write to a named pipe and have ffmpeg read it.** Rejected: OnTapo opens
-   the output path with a blocking `open()`, and opening a FIFO for writing
-   blocks until a reader attaches — which would block Home Assistant's event
-   loop.
-3. **Reuse OnTapo's internals and drive the same loop as an async generator.**
-   Chosen.
+## Snapshots
 
-So `relay_stream.py` calls OnTapo's public `request_relay()` and then its
-private framing helpers (`_open_relay`, `_control_frame`, `_read_part`, …). The
-private coupling is real, and it is contained:
+Pulling a fresh picture takes several seconds: a relay session, about four
+seconds of video, and an ffmpeg decode. So tiles never wait for one. The last
+frame is returned immediately, and a newer one is fetched in the background
+("stale while revalidate").
 
-- it lives in that one module and nowhere else;
-- `assert_ontapo_compatible()` checks every reused symbol at setup and raises
-  `IncompatibleOnTapo` with an actionable message if one moved;
+```mermaid
+sequenceDiagram
+    participant D as Dashboard tile
+    participant C as Camera entity
+    participant R as TP-Link relay
+    D->>C: picture?
+    C-->>D: last frame, instantly
+    Note over C: older than the snapshot interval,<br/>so start one background refresh
+    C->>R: open a relay session
+    R-->>C: about 4 s of MPEG-TS
+    C->>C: ffmpeg decodes one JPEG, through pipes
+    D->>C: picture? (next refresh)
+    C-->>D: the new frame
+```
+
+- At most **one** background refresh runs per camera, however many cards ask.
+- Only the very first picture after start-up is waited for.
+- If a refresh fails, the last good frame keeps showing, and a warning is
+  logged once per failing streak, not once per attempt.
+- Video goes to ffmpeg and the JPEG comes back over pipes: no temporary files
+  and no blocking file I/O on Home Assistant's event loop.
+
+## Multi-lens cameras
+
+A dual-lens camera is listed by the cloud as a **parent** device plus one
+device per lens, whose id is the parent's id with a two-digit lens number
+appended (`…00`, `…01`). The cloud refuses both passthrough calls and relay
+streams addressed to a lens id. Everything therefore goes to the parent:
+
+```mermaid
+flowchart LR
+    subgraph discovery["Discovery"]
+        p["parent id"]
+        l0["parent id + 00<br/>lens 0"]
+        l1["parent id + 01<br/>lens 1"]
+    end
+    p -- "relay stream" --> ts["one MPEG-TS<br/>video 0 · video 1"]
+    ts -- "decode video 0" --> e0["lens 0 entity"]
+    ts -- "decode video 1" --> e1["lens 1 entity"]
+    p -. "poll once · motor commands" .-> e0
+    p -. "poll once · motor commands" .-> e1
+```
+
+What was established live, with a temporary probe in 0.1.4:
+
+| Request | Result |
+|---|---|
+| Any preview, even `"channels":[0]` | **Two** video streams in the MPEG-TS, one per lens |
+| `"channels":[0,1]`, decoding video stream 1 | The other lens (thumbnail difference 44.9, against 0.2 for the same lens) |
+| `"channels":[1]` alone | Ignored: still lens 0 |
+| A relay path built the way the Tapo app formats it | Refused, HTTP 401 |
+| Any change to the cloud's signed relay URL | Refused, HTTP 401 (the 0.1.2 regression) |
+
+So the lens is chosen by **video stream index**, not by the relay request.
+Lens 0 (and every ordinary camera) sends exactly OnTapo's own request. Another
+lens asks for `[0, n]` on its own track name, and decodes video stream *n*.
+
+Polling is shared too: a lens returns its parent's poll result, reused for up
+to 60 seconds, so the parent is queried once rather than once per lens.
+
+## Token renewal
+
+A renewal is triggered when the cloud rejects the token. Two paths can trigger
+it:
+
+- the **poll** (every two minutes) renews and retries once;
+- **media** (snapshots and live view) renews at most once every **five
+  minutes** across the whole account, and renewals by the poll count towards
+  that.
+
+The media limit exists because a relay that keeps refusing would otherwise
+renew the account token on every snapshot of every card, roughly every 30
+seconds per card, risking rate limiting or a locked account.
+
+## Reuse of OnTapo internals
+
+OnTapo's public `stream_preview()` records a *fixed number of seconds to a
+file path*; Home Assistant needs an open-ended stream. Rather than reimplement
+the protocol, `relay_stream.py` calls OnTapo's public `request_relay()` and
+then its private framing helpers (`_open_relay`, `_control_frame`,
+`_read_part`, …), and `api.py` re-sends the MFA code request in the shape the
+live server requires. The coupling is contained:
+
+- it lives in those two places only;
+- `assert_ontapo_compatible()` checks every reused symbol at setup and raises a
+  clear error if one has moved;
 - the test suite asserts the same list, so a dependency bump fails CI rather
   than a user's dashboard;
 - `ontapo` is pinned exactly in `manifest.json`.
 
-If OnTapo later grows a streaming API — an async iterator, or a callback per
-chunk — this module collapses to a thin wrapper over it. That would be the
-right upstream contribution to OnTapo itself.
-
-## Live video path
-
-```
-cloud relay ──TLS──► relay_stream.iter_live_ts()   MPEG-TS chunks
-                              │
-                              ▼
-                     ffmpeg (stdin → stdout)       transcode
-                              │
-                              ▼
-            aiohttp StreamResponse (multipart MJPEG) ──► dashboard
-```
-
-The relay session, the ffmpeg process and the HTTP response are torn down
-together: whichever end goes away first stops the other two. The MJPEG route is
-used rather than Home Assistant's `stream` component because the latter needs a
-URL to hand to go2rtc, and the relay offers none — we hold the socket
-ourselves.
-
-Snapshots take the simpler route: OnTapo's public file-based `snapshot()`, into
-a temporary file that is deleted immediately, cached so a dashboard full of
-cards does not open one relay session per card per refresh.
-
-## Phasing
-
-Built in the order the brief asked for, each phase independently abandonable:
-
-1. **Verification** — `scripts/verify_remote_stream.py`, standalone, no Home
-   Assistant. If the remote path does not work for a user's region, nothing
-   below matters.
-2. **Minimal integration** — auth, discovery, live video and snapshots.
-3. **Advanced** — PTZ, state sensors, privacy, diagnostics, services.
+If OnTapo grows a streaming API, `relay_stream.py` collapses to a thin wrapper
+over it, which would also be the right contribution back to OnTapo.
 
 ## Testing
 
-81 tests, none of which touch a network, an account or a camera:
+122 tests, none of which touch a network, an account or a camera:
 
 | Area | Approach |
 |---|---|
 | `parsers.py` | pure unit tests over real-world reply shapes |
-| `api.py` | mocked OnTapo session; error-translation table |
-| `relay_stream.py` | scripted fake relay (parts, refusals, idle timeouts) + the compatibility guard |
-| config flow | `pytest-homeassistant-custom-component`, including the MFA path and that the password is never persisted |
-| entities | full HA setup against a fake account; snapshot caching, stale-frame fallback, MJPEG plumbing |
-| coordinator | token-refresh-and-retry, availability recovery |
+| `api.py` | mocked OnTapo session: error translation, lens mapping, shared polling, the renewal limit |
+| `relay_stream.py` | a scripted fake relay: parts, refusals, idle timeouts, the exact request for each channel |
+| ffmpeg | real ffmpeg, when installed: decoding a frame, and picking the second of two video streams |
+| config flow | `pytest-homeassistant-custom-component`, including MFA and that the password is never stored |
+| entities | full Home Assistant setup against a fake account: instant last frame, a single background refresh, failure logging, MJPEG plumbing |
+| coordinator | renew-and-retry, availability recovery |
+
+Several tests pin a regression found live: the relay URL must never be
+altered, lens 0 must match OnTapo's request byte for byte, and a stale frame
+must come back without waiting. Each fails on the code that had the bug.

@@ -10,8 +10,24 @@ logger:
     custom_components.tapo_cloud: debug
 ```
 
+Or switch it on **without a restart**, from **Developer tools → Actions**:
+`logger.set_level` with `custom_components.tapo_cloud: debug`. It turns itself
+off at the next restart.
+
 Tokens are never written to the log at any level, so a debug log is safe to
-share. Diagnostics (**Devices & Services → Tapo Cloud → ⋮ → Download
+share. Snapshot failures are logged as a warning even without debug logging,
+once per camera each time they start failing.
+
+```mermaid
+flowchart TD
+    start["A Tapo camera shows no picture"] --> avail{"Is the camera<br/>entity available?"}
+    avail -- "no" --> online["Check the camera is online<br/>in the Tapo app"]
+    avail -- "yes" --> log{"What does the log say<br/>after 'Snapshot failed'?"}
+    log -- "relay preview HTTP 401" --> ver["Update to the latest release;<br/>0.1.2 had this bug"]
+    log -- "relay request failed" --> region["Try another relay region<br/>in the options"]
+    log -- "ffmpeg …" --> ff["ffmpeg missing or broken:<br/>see below"]
+    log -- "nothing at all" --> dbg["Turn on debug logging,<br/>then open the dashboard"]
+``` Diagnostics (**Devices & Services → Tapo Cloud → ⋮ → Download
 diagnostics**) redact the token, refresh token, email and device ids.
 
 ---
@@ -83,10 +99,27 @@ ffmpeg component is configured with, so no path needs setting here.
 
 ### The card shows a still image that updates slowly
 
-That is the snapshot, not the live stream — expected until you open the live
-view. A snapshot costs a short relay session plus an ffmpeg decode, so it is
-cached (default 30s, configurable). Lowering the interval increases cloud
-traffic; it will not make the picture live. Click the card for the live feed.
+That is the snapshot, not the live stream. Tiles show the **last frame at
+once** and fetch a newer one in the background, at most every *Minimum seconds
+between snapshots* (default 30). Lowering it refreshes tiles more often, at the
+cost of more cloud traffic; it won't make the tile live. Tap the tile for the
+live feed (the card needs `tap_action: more-info`).
+
+### The first picture after a restart takes a few seconds
+
+Expected. Until a camera has delivered one frame, there's nothing to show while
+waiting. Every picture after that appears instantly.
+
+### Both lenses of a dual-lens camera show the same picture
+
+Update to **0.1.5 or later**. Each lens is a separate video stream inside one
+relay stream (see [ARCHITECTURE.md](ARCHITECTURE.md#multi-lens-cameras));
+releases before 0.1.5 always decoded the first one.
+
+### Every camera fails with "relay preview HTTP 401" after updating
+
+That was a bug in **0.1.2**, fixed in **0.1.3**: it altered the cloud's signed
+relay address, which the relay rejects. Update to the latest release.
 
 ### Live view takes a few seconds to start
 
@@ -133,15 +166,48 @@ To change settings, use the Tapo app or a local connection
 if the camera is on your LAN). Details in
 [VERIFICATION.md](VERIFICATION.md#risks-this-integration-has-to-live-with).
 
-### Pan/tilt says "has no pan/tilt motor"
+### Pan/tilt says "has no pan/tilt motor (the camera says so)"
 
-The camera reported no PTZ hardware during discovery. If it does in fact pan,
-the capability probe failed — reload the integration, and open an issue with
-the model.
+Since 0.1.6 the move is sent straight to the camera, and this message means the
+camera itself answered "unsupported". If it does in fact pan or tilt, open an
+issue with the model. On a **dual-lens** camera, send moves to the main camera
+or the pan/tilt lens; both reach the motor.
+
+On **0.1.5 or earlier**, this message came from a check made during discovery,
+which missed some pan/tilt models. Update.
+
+### Pan/tilt says "the Tapo cloud rejected this setting change"
+
+TP-Link's gateway refused the command before the camera saw it. Motor moves are
+normally allowed, so tell us the model in an issue.
+
+### Left and right are swapped
+
+Pan direction varies by model. Swap the positive and negative `steps` values
+on your buttons. Tilt is consistent: positive moves the view up.
 
 ---
 
 ## After an update
+
+### Updating without HACS
+
+From the **Advanced SSH & Web Terminal** add-on, set `V` to the release you
+want and run:
+
+```bash
+V=0.1.7; cd /tmp && curl -sL https://github.com/Limmi1/ha-tapo-cloud/archive/refs/tags/v$V.tar.gz | tar xz && sudo cp -r ha-tapo-cloud-$V/custom_components/tapo_cloud /config/custom_components/ && grep version /config/custom_components/tapo_cloud/manifest.json && ha core restart
+```
+
+`sudo` is needed because `/config/custom_components` belongs to root. If
+`ha core restart` reports *missing or invalid API token*, you're running it
+from a one-off SSH command rather than a login shell: restart from
+**Settings → System → ⋮ → Restart** instead.
+
+### "Detected blocking call … inside the event loop" warnings at start-up
+
+Known and harmless: OnTapo loads TP-Link's certificate bundle while setting up,
+which Home Assistant reports. Setup carries on normally.
 
 ### "ontapo 0.x.y is missing relay internals this integration reuses"
 

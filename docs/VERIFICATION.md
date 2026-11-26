@@ -140,6 +140,10 @@ These are real and are the reason the integration is defensive where it is.
 | The relay media path is architecturally remote, not LAN or P2P | ✅ verified by source review |
 | MIT licence, one dependency, no malicious code | ✅ verified by source review |
 | Login, MFA, discovery, live view work against real cameras | ✅ **independently verified 2026-11-26** against a current Tapo pan/tilt camera on a separate network — 2304×1296 H.264 over a public relay, no LAN/VPN. See *Live run* below. |
+| Snapshots in Home Assistant, all cameras including both lenses of a dual-lens camera | ✅ verified 2026-11-26: full-resolution frames for each camera, and each lens shows its own view (0.1.5) |
+| Each lens is a separate video stream in one relay stream | ✅ verified with the 0.1.4 lens probe; see [ARCHITECTURE.md](ARCHITECTURE.md#multi-lens-cameras) |
+| Pan/tilt over the cloud | ✅ commands accepted by the camera without error (0.1.7); the physical movement was not observed during the test |
+| Live view in the camera pop-up (MJPEG) | ⚠️ implemented and tested against fakes; not yet watched on a real camera |
 | Cloud setters are rejected | ⚠️ reported by OnTapo's author; the integration assumes it and degrades gracefully if it is wrong |
 | Works from outside ap-southeast-1 | ✅ verified: the hardcoded negotiation host still returned a correct regional relay |
 
