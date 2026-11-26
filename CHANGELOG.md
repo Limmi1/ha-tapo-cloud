@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.7] - 2026-11-26
+
+### Changed
+
+- **Camera tiles show the last picture straight away.** Before, when a
+  picture was due for a refresh, Home Assistant waited the several seconds
+  it takes to pull a new one, so cards sat blank or loading. Now the last
+  frame is returned at once and a newer one is fetched in the background
+  (at most one at a time per camera), so the next refresh shows it. Only the
+  first picture after a restart is waited for. Refresh timing still follows
+  the "Minimum seconds between snapshots" option.
+
 ## [0.1.6] - 2026-11-26
 
 ### Fixed
@@ -136,6 +148,7 @@ All notable changes to this project are documented here. The format follows
   and the server reports refusals as HTTP 200, which looked like success.
 - Codes typed with a separator, such as `150-791`, were rejected.
 
+[0.1.7]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.7
 [0.1.6]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.6
 [0.1.5]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.5
 [0.1.4]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.4

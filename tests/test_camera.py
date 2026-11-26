@@ -71,6 +71,7 @@ async def test_the_cache_expires(
 
     await async_get_image(hass, "camera.garden")
     await async_get_image(hass, "camera.garden")
+    await hass.async_block_till_done()  # the refresh runs in the background
     assert mock_account.cameras[ptz_camera_info.device_id].async_snapshot.await_count == 2
 
 
@@ -312,3 +313,66 @@ def test_live_view_transcodes_the_lens_own_video_stream():
         assert args[args.index("-map") + 1] == f"0:v:{stream}"
         # The map comes after the input it refers to.
         assert args.index("-map") > args.index("pipe:0")
+
+
+async def test_the_last_frame_is_shown_at_once_while_a_new_one_loads(
+    hass: HomeAssistant, entry_data, mock_account, ptz_camera_info
+):
+    """A stale frame is returned immediately; the slow refresh lands later."""
+    import asyncio
+
+    await _setup(hass, entry_data, mock_account, options={CONF_SNAPSHOT_INTERVAL: 0})
+    camera = mock_account.cameras[ptz_camera_info.device_id]
+    old_frame, new_frame = JPEG, b"\xff\xd8new-frame\xff\xd9"
+
+    _writes_jpeg(mock_account, ptz_camera_info.device_id, old_frame)
+    assert (await async_get_image(hass, "camera.garden")).content == old_frame
+
+    release = asyncio.Event()
+
+    async def slow_snapshot(**kwargs):
+        await release.wait()  # the camera takes its time
+        return new_frame
+
+    camera.async_snapshot = AsyncMock(side_effect=slow_snapshot)
+
+    # Answered straight away with the last frame, though the refresh is stuck.
+    image = await asyncio.wait_for(async_get_image(hass, "camera.garden"), timeout=2)
+    assert image.content == old_frame
+
+    release.set()
+    await hass.async_block_till_done()
+    assert (await async_get_image(hass, "camera.garden")).content == new_frame
+
+
+async def test_many_requests_start_only_one_background_refresh(
+    hass: HomeAssistant, entry_data, mock_account, ptz_camera_info
+):
+    import asyncio
+
+    await _setup(hass, entry_data, mock_account, options={CONF_SNAPSHOT_INTERVAL: 0})
+    camera = mock_account.cameras[ptz_camera_info.device_id]
+    _writes_jpeg(mock_account, ptz_camera_info.device_id)
+    await async_get_image(hass, "camera.garden")  # first frame
+
+    release = asyncio.Event()
+
+    async def slow_snapshot(**kwargs):
+        await release.wait()
+        return JPEG
+
+    camera.async_snapshot = AsyncMock(side_effect=slow_snapshot)
+    for _ in range(10):  # a dashboard full of cards, all asking at once
+        await async_get_image(hass, "camera.garden")
+    release.set()
+    await hass.async_block_till_done()
+    assert camera.async_snapshot.await_count == 1
+
+
+async def test_the_very_first_frame_is_waited_for(
+    hass: HomeAssistant, entry_data, mock_account, ptz_camera_info
+):
+    """With nothing to show yet, the first request waits for a real frame."""
+    await _setup(hass, entry_data, mock_account)
+    _writes_jpeg(mock_account, ptz_camera_info.device_id)
+    assert (await async_get_image(hass, "camera.garden")).content == JPEG

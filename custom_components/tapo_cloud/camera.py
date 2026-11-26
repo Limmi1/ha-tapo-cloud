@@ -89,6 +89,7 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
         self._snapshot_at: float = 0.0
         self._snapshot_lock = asyncio.Lock()
         self._snapshot_failing = False
+        self._refresh_task: asyncio.Task[bytes | None] | None = None
 
     @property
     def _resolution(self) -> str:
@@ -107,13 +108,36 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
-        """Return a recent still frame, decoding a new one when the cache ages out."""
-        async with self._snapshot_lock:
-            fresh = (
-                self._snapshot is not None
-                and (time.monotonic() - self._snapshot_at) < self._snapshot_interval
+        """Return the last frame at once; fetch a newer one in the background.
+
+        Pulling a new frame takes several seconds (relay session, a few seconds
+        of video, an ffmpeg decode). Waiting for that on every refresh left
+        dashboard cards blank or loading. Instead, once a frame exists, it is
+        returned immediately ("stale while revalidate"); if it is older than
+        ``snapshot_interval``, one background refresh starts, and the next
+        request gets the new frame. Only the very first frame, when there is
+        nothing to show yet, is waited for.
+        """
+        if self._snapshot is None:
+            return await self._async_refresh_snapshot()
+        if self._snapshot_stale and (
+            self._refresh_task is None or self._refresh_task.done()
+        ):
+            self._refresh_task = self.hass.async_create_background_task(
+                self._async_refresh_snapshot(),
+                name=f"{self.entity_id} snapshot refresh",
             )
-            if fresh:
+        return self._snapshot
+
+    @property
+    def _snapshot_stale(self) -> bool:
+        return (time.monotonic() - self._snapshot_at) >= self._snapshot_interval
+
+    async def _async_refresh_snapshot(self) -> bytes | None:
+        """Fetch a new frame, keeping the last good one if that fails."""
+        async with self._snapshot_lock:
+            # Another caller may have refreshed while this one waited.
+            if self._snapshot is not None and not self._snapshot_stale:
                 return self._snapshot
 
             try:
@@ -124,7 +148,7 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
                 log = _LOGGER.debug if self._snapshot_failing else _LOGGER.warning
                 log("Snapshot failed for %s: %s", self.name or self.entity_id, err)
                 self._snapshot_failing = True
-                # Serve the stale frame rather than a broken-image icon.
+                # Keep showing the last good frame rather than a broken image.
                 return self._snapshot
 
             if self._snapshot_failing:
