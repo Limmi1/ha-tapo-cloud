@@ -1,0 +1,30 @@
+# Never commit credentials, tokens or camera footage
+session.json
+*.session.json
+secrets.yaml
+.env
+*.ts
+*.mp4
+*.jpg
+*.jpeg
+*.png
+!docs/images/*.png
+!custom_components/tapo_cloud/brand/*.png
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+.coverage
+htmlcov/
+.DS_Store
+
+# build artifact
+tapo_cloud.zip
+
+# CI workflow kept local until the gh token has the workflow scope
+.github/workflows/

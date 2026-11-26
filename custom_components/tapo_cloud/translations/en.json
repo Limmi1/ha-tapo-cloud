@@ -1,0 +1,81 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Tapo account",
+        "description": "Sign in with the TP-Link Tapo account that owns the cameras. Your password is used once to obtain a session token and is not stored.",
+        "data": { "email": "Email", "password": "Password" }
+      },
+      "mfa": {
+        "title": "Two-factor verification",
+        "description": "Enter the verification code sent to {email}.",
+        "data": { "code": "Verification code" }
+      },
+      "reauth_confirm": {
+        "title": "Sign in again",
+        "description": "The stored session for {email} expired and could not be renewed.",
+        "data": { "email": "Email", "password": "Password" }
+      }
+    },
+    "error": {
+      "invalid_auth": "Incorrect email or password.",
+      "invalid_code": "That verification code was not accepted.",
+      "cannot_connect": "Could not reach the Tapo cloud. Check this machine's internet connection.",
+      "mfa_send_failed": "Could not request a verification code. Try again shortly.",
+      "mfa_unsupported": "This account needs a second factor that is not supported yet.",
+      "unknown": "Unexpected error. Check the Home Assistant log."
+    },
+    "abort": {
+      "already_configured": "That Tapo account is already set up.",
+      "reauth_successful": "Tapo Cloud is signed in again."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tapo Cloud options",
+        "data": {
+          "resolution": "Live stream quality",
+          "snapshot_interval": "Minimum seconds between snapshots",
+          "relay_host": "Relay region host"
+        },
+        "data_description": {
+          "snapshot_interval": "A snapshot opens a short relay session and decodes a frame, so it is cached for this long.",
+          "relay_host": "Change this only if live view fails with a relay error. The default covers ap-southeast-1."
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "privacy_mode": { "name": "Privacy mode" },
+      "motion_detection": { "name": "Motion detection" },
+      "sd_card": { "name": "SD card problem" }
+    },
+    "switch": {
+      "privacy_mode": { "name": "Privacy mode" }
+    }
+  },
+  "services": {
+    "pan": {
+      "name": "Pan",
+      "description": "Pan the camera by a relative number of steps. 10 is a nudge, 150 a large sweep.",
+      "fields": { "steps": { "name": "Steps", "description": "Positive and negative pan in opposite directions." } }
+    },
+    "tilt": {
+      "name": "Tilt",
+      "description": "Tilt the camera by a relative number of steps.",
+      "fields": { "steps": { "name": "Steps", "description": "Positive tilts the view up." } }
+    },
+    "move_to_preset": {
+      "name": "Move to preset",
+      "description": "Move the camera to one of its saved preset positions.",
+      "fields": { "preset": { "name": "Preset", "description": "The preset id, as saved on the camera." } }
+    },
+    "set_privacy_mode": {
+      "name": "Set privacy mode",
+      "description": "Attempt to turn privacy mode on or off. The Tapo cloud currently rejects setting changes; pan, tilt and presets are unaffected.",
+      "fields": { "enabled": { "name": "Enabled", "description": "Whether privacy mode should be on." } }
+    }
+  }
+}

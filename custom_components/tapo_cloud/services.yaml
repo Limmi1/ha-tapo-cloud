@@ -1,0 +1,52 @@
+pan:
+  target:
+    entity:
+      integration: tapo_cloud
+      domain: camera
+  fields:
+    steps:
+      required: true
+      example: 80
+      selector:
+        number:
+          min: -360
+          max: 360
+          mode: box
+
+tilt:
+  target:
+    entity:
+      integration: tapo_cloud
+      domain: camera
+  fields:
+    steps:
+      required: true
+      example: -40
+      selector:
+        number:
+          min: -360
+          max: 360
+          mode: box
+
+move_to_preset:
+  target:
+    entity:
+      integration: tapo_cloud
+      domain: camera
+  fields:
+    preset:
+      required: true
+      example: "1"
+      selector:
+        text:
+
+set_privacy_mode:
+  target:
+    entity:
+      integration: tapo_cloud
+      domain: camera
+  fields:
+    enabled:
+      required: true
+      selector:
+        boolean:

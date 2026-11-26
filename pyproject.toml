@@ -1,0 +1,19 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 95
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["SIM117", "ASYNC230", "ASYNC240"]
+"custom_components/tapo_cloud/relay_stream.py" = ["SLF001"]
+"custom_components/tapo_cloud/api.py" = ["SLF001"]
+# An interactive one-shot CLI: it owns the event loop, so prompting on it is fine.
+"scripts/*" = ["ASYNC250", "SLF001"]

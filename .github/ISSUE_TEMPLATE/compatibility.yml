@@ -1,0 +1,32 @@
+name: Camera compatibility
+description: Tell us how a camera model behaves over the cloud.
+labels: [compatibility]
+body:
+  - type: input
+    id: model
+    attributes:
+      label: Camera model
+      placeholder: e.g. C200
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware version
+  - type: checkboxes
+    id: works
+    attributes:
+      label: What works?
+      options:
+        - label: Discovered automatically
+        - label: Live view
+        - label: Snapshots
+        - label: Pan / tilt
+        - label: Presets
+        - label: Motion detection state
+        - label: Privacy mode state
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything else, such as errors seen or features that show as unavailable.

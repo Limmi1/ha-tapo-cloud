@@ -1,0 +1,5 @@
+ontapo==0.1.0
+pytest-homeassistant-custom-component
+ha-ffmpeg
+ruff
+PyTurboJPEG

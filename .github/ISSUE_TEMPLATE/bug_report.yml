@@ -1,0 +1,54 @@
+name: Bug report
+description: Something isn't working as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste passwords, tokens, verification codes, footage or unredacted diagnostics.**
+        Check the [troubleshooting guide](https://github.com/Limmi1/ha-tapo-cloud/blob/main/docs/TROUBLESHOOTING.md) first.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Sign-in / two-factor
+        - Camera discovery
+        - Live view
+        - Snapshots
+        - Pan / tilt / presets
+        - Sensors / switches
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Camera model and firmware
+      placeholder: e.g. C210, 1.3.9
+  - type: input
+    id: ha
+    attributes:
+      label: Home Assistant version and install type
+      placeholder: e.g. 2026.10.4, Home Assistant OS
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: Output of scripts/verify_remote_stream.py
+      description: Optional but very useful. Remove anything identifying first.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Debug log excerpt
+      description: Enable `custom_components.tapo_cloud: debug` logging. Tokens are never logged, but check for anything else you'd rather not share.
+      render: text
