@@ -616,3 +616,82 @@ async def test_decode_picks_the_requested_video_stream_with_real_ffmpeg():
         assert image.size == (320, 240)
     with Image.open(io.BytesIO(second)) as image:
         assert image.size == (160, 90)
+
+
+# -- media proof shared by a camera's lenses (0.1.8) ---------------------------
+
+def test_video_from_any_lens_counts_for_its_physical_camera():
+    account = TapoCloudAccount(MagicMock())
+    now = [5000.0]
+    account._clock = lambda: now[0]
+    assert account.media_ok_within(PARENT, 300) is False
+
+    account.mark_media_ok(PARENT)  # e.g. the PT lens streams its parent
+    assert account.media_ok_within(PARENT, 300) is True
+    now[0] += 301
+    assert account.media_ok_within(PARENT, 300) is False
+
+
+async def test_a_lens_snapshot_records_media_for_the_parent():
+    account = TapoCloudAccount(MagicMock())
+    fake, _ = _stream_of(b"\x47ts")
+    with (
+        patch(f"{API}.iter_live_ts", fake),
+        patch(f"{API}.decode_first_frame", AsyncMock(return_value=b"J")),
+    ):
+        await account.camera(_lens_info(1)).async_snapshot(seconds=0)
+    assert account.media_ok_within(PARENT, 60) is True
+
+
+async def test_live_video_records_media():
+    account = TapoCloudAccount(MagicMock())
+    fake, _ = _stream_of(b"\x47live")
+    with patch(f"{API}.iter_live_ts", fake):
+        _ = [c async for c in account.camera(_lens_info(1)).iter_live_ts()]
+    assert account.media_ok_within(PARENT, 60) is True
+
+
+# -- motor commands and HTTP 408 (0.1.8) ---------------------------------------
+
+def _motor_camera(pan_effects):
+    session = MagicMock()
+    device = MagicMock()
+    device.pan = AsyncMock(side_effect=pan_effects)
+    session.device.return_value = device
+    return device, TapoCloudAccount(session).camera(_parent_info())
+
+
+async def test_a_cloud_timeout_on_pan_is_retried(caplog):
+    device, camera = _motor_camera([CloudError(408, "gateway timeout"), {}])
+    with patch(f"{API}.MOTOR_RETRY_DELAYS", (0, 0)):
+        await camera.async_pan(30)
+    assert device.pan.await_count == 2
+    assert "HTTP 408" in caplog.text and "gateway timeout" in caplog.text
+
+
+async def test_repeated_timeouts_give_up_after_three_attempts(caplog):
+    device, camera = _motor_camera([CloudError(408)] * 3)
+    with patch(f"{API}.MOTOR_RETRY_DELAYS", (0, 0)), pytest.raises(CloudTransportError):
+        await camera.async_pan(30)
+    assert device.pan.await_count == 3
+    assert "(empty response body)" in caplog.text
+
+
+async def test_other_cloud_errors_are_not_retried():
+    device, camera = _motor_camera([CloudError(400, "MODEL_SCHEMA_CHECK_FAILED")])
+    with patch(f"{API}.MOTOR_RETRY_DELAYS", (0, 0)), pytest.raises(CloudSetterRejected):
+        await camera.async_pan(30)
+    assert device.pan.await_count == 1
+
+
+async def test_an_unsupported_motor_is_raised_unchanged():
+    device, camera = _motor_camera([UnsupportedMethod("motorMove")])
+    with pytest.raises(UnsupportedMethod) as caught:
+        await camera.async_pan(30)
+    assert caught.value.__cause__ is not caught.value  # no self-referential cause
+
+
+def test_cloud_errors_are_classified_by_status_code_not_message_text():
+    """A 408 whose message happens to contain '400' is a timeout, not a refusal."""
+    assert isinstance(_map_error(CloudError(408, "waited 4000 ms")), CloudTransportError)
+    assert isinstance(_map_error(CloudError(400)), CloudSetterRejected)

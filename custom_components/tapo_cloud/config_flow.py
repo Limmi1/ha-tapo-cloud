@@ -37,12 +37,16 @@ from .const import (
     CONF_ACCOUNT_BASE,
     CONF_APP_SERVER,
     CONF_EMAIL,
+    CONF_LIVE_FPS,
+    CONF_LIVE_WIDTH,
     CONF_REFRESH_TOKEN,
     CONF_RELAY_HOST,
     CONF_RESOLUTION,
     CONF_SNAPSHOT_INTERVAL,
     CONF_TERMINAL_UUID,
     CONF_TOKEN,
+    DEFAULT_LIVE_FPS,
+    DEFAULT_LIVE_WIDTH,
     DEFAULT_RELAY_HOST,
     DEFAULT_RESOLUTION,
     DEFAULT_SNAPSHOT_INTERVAL,
@@ -260,6 +264,18 @@ class TapoCloudOptionsFlow(OptionsFlow):
                     ),
                 ): NumberSelector(
                     NumberSelectorConfig(min=10, max=600, step=5, unit_of_measurement="s")
+                ),
+                vol.Optional(
+                    CONF_LIVE_WIDTH,
+                    default=options.get(CONF_LIVE_WIDTH, DEFAULT_LIVE_WIDTH),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=3840, step=16, unit_of_measurement="px")
+                ),
+                vol.Optional(
+                    CONF_LIVE_FPS,
+                    default=options.get(CONF_LIVE_FPS, DEFAULT_LIVE_FPS),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="fps")
                 ),
                 vol.Optional(
                     CONF_RELAY_HOST,

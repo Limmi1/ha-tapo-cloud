@@ -28,8 +28,12 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api import CloudAuthError, CloudTransportError, OnTapoError
 from .const import (
+    CONF_LIVE_FPS,
+    CONF_LIVE_WIDTH,
     CONF_RESOLUTION,
     CONF_SNAPSHOT_INTERVAL,
+    DEFAULT_LIVE_FPS,
+    DEFAULT_LIVE_WIDTH,
     DEFAULT_RESOLUTION,
     DEFAULT_SNAPSHOT_INTERVAL,
     DEFAULT_SNAPSHOT_SECONDS,
@@ -44,10 +48,15 @@ _MJPEG_BOUNDARY = "tapocloudframe"
 # ffmpeg is told to expect MPEG-TS on stdin and emit MJPEG on stdout. The low
 # analyzeduration/probesize keep first-frame latency down on a relay stream
 # that starts mid-GOP.
+#
+# Two settings matter more than they look (tested against ffmpeg 8.1 with
+# real H.264, see tests): "-fflags nobuffer", used before 0.1.8, makes ffmpeg
+# decode nothing at all from piped MPEG-TS; and the MJPEG encoder refuses the
+# camera's limited-range video unless asked for full-range output
+# ("-pix_fmt yuvj420p"). Either one alone left live view blank.
 _FFMPEG_ARGS = (
     "-hide_banner",
     "-loglevel", "error",
-    "-fflags", "nobuffer",
     "-flags", "low_delay",
     "-analyzeduration", "1000000",
     "-probesize", "1000000",
@@ -55,6 +64,8 @@ _FFMPEG_ARGS = (
     "-i", "pipe:0",
     "-map", "0:v:{stream}",  # the lens's own video stream; see relay_stream
     "-an",
+    "-pix_fmt", "yuvj420p",  # full-range JPEG; see above
+    # (a "-vf" scale/frame-rate filter is inserted here; see _ffmpeg_args)
     "-f", "mpjpeg",
     "-q:v", "6",
     "-boundary_tag", _MJPEG_BOUNDARY,
@@ -192,7 +203,11 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
 
         process = await asyncio.create_subprocess_exec(
             ffmpeg,
-            *_ffmpeg_args(self.coordinator.info.channel),
+            *_ffmpeg_args(
+                self.coordinator.info.channel,
+                int(self._entry.options.get(CONF_LIVE_WIDTH, DEFAULT_LIVE_WIDTH)),
+                int(self._entry.options.get(CONF_LIVE_FPS, DEFAULT_LIVE_FPS)),
+            ),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -209,6 +224,10 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
         feeder = asyncio.create_task(self._async_feed(process))
         try:
             await response.prepare(request)
+            if self._snapshot is not None:
+                # Show the last frame at once; live frames replace it as soon
+                # as the relay and ffmpeg deliver (a few seconds).
+                await response.write(_mjpeg_part(self._snapshot))
             while True:
                 chunk = await process.stdout.read(65536)
                 if not chunk:
@@ -249,7 +268,34 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
                 stdin.close()
 
 
-def _ffmpeg_args(stream: int) -> tuple[str, ...]:
-    """ffmpeg arguments that transcode video stream ``stream`` to MJPEG."""
-    return tuple(arg.format(stream=int(stream)) for arg in _FFMPEG_ARGS)
+def _ffmpeg_args(stream: int, width: int = 0, fps: int = 0) -> tuple[str, ...]:
+    """ffmpeg arguments that transcode video stream ``stream`` to MJPEG.
+
+    ``width`` caps the frame width (keeping the aspect ratio; never upscales)
+    and ``fps`` caps the frame rate; 0 leaves either as the camera sends it.
+    The camera's native 2304x1296 at ~14 fps is roughly 3.5 MB/s per viewer;
+    1280 px at 5 fps is a small fraction of that.
+    """
+    args = [arg.format(stream=int(stream)) for arg in _FFMPEG_ARGS]
+    filters = []
+    if fps and int(fps) > 0:
+        filters.append(f"fps={int(fps)}")
+    if width and int(width) > 0:
+        # min() so a narrower stream is left alone; "\\," escapes the comma
+        # inside the expression from the filter-chain separator; -2 keeps the
+        # height even, which the JPEG encoder needs.
+        filters.append(f"scale=min({int(width)}\\,iw):-2")
+    if filters:
+        at = args.index("mpjpeg") - 1  # just before "-f mpjpeg"
+        args[at:at] = ["-vf", ",".join(filters)]
+    return tuple(args)
+
+
+def _mjpeg_part(image: bytes) -> bytes:
+    """One multipart MJPEG part, framed exactly as ffmpeg's mpjpeg muxer does."""
+    return (
+        f"--{_MJPEG_BOUNDARY}\r\n"
+        "Content-type: image/jpeg\r\n"
+        f"Content-length: {len(image)}\r\n\r\n"
+    ).encode() + image + b"\r\n"
 

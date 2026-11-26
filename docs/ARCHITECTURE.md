@@ -61,6 +61,12 @@ flowchart LR
     resp --> ui["Camera pop-up<br/>or live card"]
 ```
 
+When live view opens, the last cached frame is sent first so the card is never
+blank, then ffmpeg's frames follow. ffmpeg scales frames to the *Live view
+width* (default 1280 px, never upscaling) and caps them at the *Live view frame
+rate* (default 5 fps). The camera's native 2304×1296 at about 14 fps is around
+3.5 MB/s per viewer.
+
 The relay session, the ffmpeg process and the HTTP response are torn down
 together: whichever goes away first (closing the pop-up, a relay drop, ffmpeg
 exiting) stops the other two.
@@ -132,6 +138,19 @@ lens asks for `[0, n]` on its own track name, and decodes video stream *n*.
 Polling is shared too: a lens returns its parent's poll result, reused for up
 to 60 seconds, so the parent is queried once rather than once per lens.
 
+## Availability
+
+The cloud's status check (a passthrough `device_info` call) fails
+intermittently, often with HTTP 408, while the camera's video relay keeps
+working. Marking a camera unavailable on one such failure made Home Assistant
+revoke the entity's access token, which blanked every open live view. So:
+
+- a camera goes unavailable only after **three** failed polls in a row (about
+  six minutes), and until then its last good state is kept;
+- video or a snapshot from the **physical camera** in the last five minutes
+  proves it online, whatever the poll says. Every lens counts for its camera;
+- every camera and lens follows this same rule.
+
 ## Token renewal
 
 A renewal is triggered when the cloud rejects the token. Two paths can trigger
@@ -167,17 +186,17 @@ over it, which would also be the right contribution back to OnTapo.
 
 ## Testing
 
-122 tests, none of which touch a network, an account or a camera:
+142 tests, none of which touch a network, an account or a camera:
 
 | Area | Approach |
 |---|---|
 | `parsers.py` | pure unit tests over real-world reply shapes |
 | `api.py` | mocked OnTapo session: error translation, lens mapping, shared polling, the renewal limit |
 | `relay_stream.py` | a scripted fake relay: parts, refusals, idle timeouts, the exact request for each channel |
-| ffmpeg | real ffmpeg, when installed: decoding a frame, and picking the second of two video streams |
+| ffmpeg | real ffmpeg, when installed: decoding a frame, picking the second of two video streams, and live view's scaling, frame-rate cap and output |
 | config flow | `pytest-homeassistant-custom-component`, including MFA and that the password is never stored |
 | entities | full Home Assistant setup against a fake account: instant last frame, a single background refresh, failure logging, MJPEG plumbing |
-| coordinator | renew-and-retry, availability recovery |
+| coordinator | renew-and-retry, riding out failed polls, recent video as proof of life |
 
 Several tests pin a regression found live: the relay URL must never be
 altered, lens 0 must match OnTapo's request byte for byte, and a stale frame

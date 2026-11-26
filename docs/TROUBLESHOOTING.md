@@ -145,6 +145,12 @@ Fine — the relay fans one live stream out to many viewers. (Recording
 
 ### A camera shows as unavailable
 
+Since 0.1.8 a camera only goes unavailable after **three failed status checks
+in a row** (about six minutes), and never while video or a snapshot from it
+arrived in the last five minutes. Brief cloud hiccups, which are common, no
+longer blank the dashboard. If it still goes unavailable, the camera really
+isn't reachable through the cloud:
+
 The cloud answered but the camera did not. Check it is online in the Tapo app:
 the usual causes are at the camera's end — power, its own internet connection,
 or a firmware update in progress. The integration polls every two minutes and
@@ -183,6 +189,14 @@ which missed some pan/tilt models. Update.
 TP-Link's gateway refused the command before the camera saw it. Motor moves are
 normally allowed, so tell us the model in an issue.
 
+### Pan/tilt fails with "cloud rejected the request for 'motorMove' (HTTP 408)"
+
+The cloud timed out reaching the camera. Since 0.1.8 a 408 is retried twice,
+after 0.5 s and 1.5 s, and each one is logged with the cloud's message. If all
+three fail, the camera is unreachable through the cloud at that moment. Pan and
+tilt are relative moves, so if the cloud timed out *after* the camera had
+already moved, a retry moves it a second time.
+
 ### Left and right are swapped
 
 Pan direction varies by model. Swap the positive and negative `steps` values
@@ -198,7 +212,7 @@ From the **Advanced SSH & Web Terminal** add-on, set `V` to the release you
 want and run:
 
 ```bash
-V=0.1.7; cd /tmp && curl -sL https://github.com/Limmi1/ha-tapo-cloud/archive/refs/tags/v$V.tar.gz | tar xz && sudo cp -r ha-tapo-cloud-$V/custom_components/tapo_cloud /config/custom_components/ && grep version /config/custom_components/tapo_cloud/manifest.json && ha core restart
+V=0.1.8; cd /tmp && curl -sL https://github.com/Limmi1/ha-tapo-cloud/archive/refs/tags/v$V.tar.gz | tar xz && sudo cp -r ha-tapo-cloud-$V/custom_components/tapo_cloud /config/custom_components/ && grep version /config/custom_components/tapo_cloud/manifest.json && ha core restart
 ```
 
 `sudo` is needed because `/config/custom_components` belongs to root. If

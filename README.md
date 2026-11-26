@@ -67,7 +67,7 @@ flowchart LR
 | Snapshots that appear instantly (last frame shown while a new one loads) | ✅ |
 | Dual-lens cameras, each lens as its own camera | ✅ |
 | Pan, tilt and presets | ✅ |
-| Availability tracking and automatic reconnection | ✅ |
+| Availability that rides out brief cloud hiccups, and automatic reconnection | ✅ |
 | Motion detection and privacy mode **state** | ✅ read-only |
 | **Changing** motion detection or privacy mode | ❌ the cloud refuses all setting changes ([why](docs/VERIFICATION.md#risks-this-integration-has-to-live-with)) |
 | SD-card playback, two-way audio | ❌ not yet |
@@ -101,7 +101,7 @@ HACS then tells you when an update is available.
 With the **Advanced SSH & Web Terminal** add-on, install or update to a given release in one go. Set `V` to the version you want from the [releases page](https://github.com/Limmi1/ha-tapo-cloud/releases):
 
 ```bash
-V=0.1.7; cd /tmp && curl -sL https://github.com/Limmi1/ha-tapo-cloud/archive/refs/tags/v$V.tar.gz | tar xz && sudo cp -r ha-tapo-cloud-$V/custom_components/tapo_cloud /config/custom_components/ && grep version /config/custom_components/tapo_cloud/manifest.json && ha core restart
+V=0.1.8; cd /tmp && curl -sL https://github.com/Limmi1/ha-tapo-cloud/archive/refs/tags/v$V.tar.gz | tar xz && sudo cp -r ha-tapo-cloud-$V/custom_components/tapo_cloud /config/custom_components/ && grep version /config/custom_components/tapo_cloud/manifest.json && ha core restart
 ```
 
 The `grep` line prints the installed version before Home Assistant restarts. `sudo` is needed because `/config/custom_components` belongs to root on Home Assistant OS.
@@ -130,6 +130,8 @@ Your password is used to sign in and request that code, then discarded. Only the
 | Option | Default | When to change it |
 |---|---|---|
 | Live stream quality | `HD` | `VGA` on a slow connection |
+| Live view width | `1280` px | Smaller for phones or slow links; `0` for the camera's full resolution |
+| Live view frame rate | `5` fps | Higher for smoother motion, at more bandwidth; `0` for the camera's own rate |
 | Minimum seconds between snapshots | `30` | How often a tile's picture is refreshed in the background |
 | Relay region host | `aps1-cipc-api…` | Only if live view fails with a relay error ([guide](docs/TROUBLESHOOTING.md#live-view-fails-snapshots-fail-everything-else-works)) |
 
@@ -138,7 +140,7 @@ Your password is used to sign in and request that code, then discarded. Only the
 Each camera becomes a device with a camera entity, plus sensors for whatever that model reports.
 
 - **Tiles:** a **Picture Entity** or **Picture Glance** card shows the latest picture. It appears instantly (the last frame) and refreshes in the background.
-- **Live video:** tap a tile (with `tap_action: more-info`) to open the camera pop-up with live video.
+- **Live video:** tap a tile (with `tap_action: more-info`) to open the camera pop-up with live video. It shows the last frame instantly, then switches to live, scaled to 1280 px at 5 fps by default (about a tenth of the camera's native bandwidth).
 
 ### Pan and tilt
 

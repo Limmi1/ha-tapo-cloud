@@ -182,13 +182,26 @@ def _map_error(err: Exception) -> Exception:
         return CloudAuthError(str(err))
     if isinstance(err, CloudError):
         text = str(err)
-        if "MODEL_SCHEMA_CHECK_FAILED" in text or "400" in text:
+        status = getattr(err, "status_code", None)
+        if status == 400 or "MODEL_SCHEMA_CHECK_FAILED" in text:
             return CloudSetterRejected(text)
         return CloudTransportError(text)
     if isinstance(err, RelayError):
         return CloudTransportError(str(err))
     return err
 
+
+def _reraise(err: Exception) -> None:
+    """Raise ``err`` translated; an untranslated error is raised as itself."""
+    mapped = _map_error(err)
+    if mapped is err:
+        raise err
+    raise mapped from err
+
+
+# Pauses (seconds) before retrying a motor command that the cloud timed out
+# (HTTP 408): two retries, so three attempts in all.
+MOTOR_RETRY_DELAYS: tuple[float, ...] = (0.5, 1.5)
 
 # A media path that keeps getting refused renews the account token at most
 # this often (seconds), account-wide.
@@ -300,7 +313,7 @@ async def async_submit_mfa(session: OnTapo, code: str, mfa_type: int = 2) -> Non
     try:
         await session.submit_mfa(digits, mfa_type)
     except Exception as err:  # noqa: BLE001
-        raise _map_error(err) from err
+        _reraise(err)
 
 
 class TapoCloudAccount:
@@ -314,6 +327,9 @@ class TapoCloudAccount:
         self._last_refresh: float | None = None
         self._discovered: dict[str, CameraInfo] = {}
         self._handles: dict[str, TapoCloudCamera] = {}
+        # When video last arrived from each physical camera (keyed by the
+        # device the relay streams, so every lens counts for its camera).
+        self._media_ok: dict[str, float] = {}
         if relay_host:
             self._apply_relay_host(relay_host)
 
@@ -372,7 +388,7 @@ class TapoCloudAccount:
         except MFARequired:
             raise
         except Exception as err:  # noqa: BLE001 - translated below
-            raise _map_error(err) from err
+            _reraise(err)
         return cls(session, relay_host=relay_host)
 
     @classmethod
@@ -397,7 +413,7 @@ class TapoCloudAccount:
         try:
             await self._session.refresh()
         except Exception as err:  # noqa: BLE001
-            raise _map_error(err) from err
+            _reraise(err)
         return self.tokens
 
     async def async_refresh_token_throttled(
@@ -440,7 +456,7 @@ class TapoCloudAccount:
         try:
             cameras = await self._session.cameras()
         except Exception as err:  # noqa: BLE001
-            raise _map_error(err) from err
+            _reraise(err)
 
         lenses = map_lenses([cam.device_id for cam in cameras])
 
@@ -509,6 +525,15 @@ class TapoCloudAccount:
             self._handles[info.device_id] = handle
         return handle
 
+    def mark_media_ok(self, stream_device_id: str) -> None:
+        """Record that video just arrived from this physical camera."""
+        self._media_ok[stream_device_id] = self._clock()
+
+    def media_ok_within(self, stream_device_id: str, seconds: float) -> bool:
+        """Whether video arrived from this camera in the last ``seconds``."""
+        when = self._media_ok.get(stream_device_id)
+        return when is not None and self._clock() - when <= seconds
+
     def parent_camera(self, info: CameraInfo) -> TapoCloudCamera | None:
         """The parent camera's handle for a lens, or ``None`` if not a lens."""
         if not info.is_lens:
@@ -558,6 +583,7 @@ class TapoCloudCamera:
             try:
                 async for chunk in self._raw_live_ts(resolution):
                     produced = True
+                    self._account.mark_media_ok(self._info.stream_device_id)
                     yield chunk
                 return
             except Unauthorized:
@@ -643,6 +669,7 @@ class TapoCloudCamera:
                 raise RelayError("relay produced no video before timing out") from None
         if not chunks:
             raise RelayError("relay produced no video")
+        self._account.mark_media_ok(self._info.stream_device_id)
         return b"".join(chunks)
 
     # -- state ----------------------------------------------------------
@@ -697,14 +724,47 @@ class TapoCloudCamera:
 
     async def async_pan(self, steps: int) -> None:
         """Pan by relative ``steps``. ``motorMove`` is gateway-whitelisted."""
-        await self._call(self._device.pan(steps))
+        await self._motor(lambda: self._device.pan(steps), "pan")
 
     async def async_tilt(self, steps: int) -> None:
         """Tilt by relative ``steps``; positive tilts the view up."""
-        await self._call(self._device.tilt(steps))
+        await self._motor(lambda: self._device.tilt(steps), "tilt")
 
     async def async_move_to_preset(self, preset: str) -> None:
-        await self._call(self._device.move_to_preset(preset))
+        await self._motor(lambda: self._device.move_to_preset(preset), "move to preset")
+
+    async def _motor(self, command: Callable[[], Awaitable[Any]], what: str) -> Any:
+        """Send a motor command, retrying when the cloud times out (HTTP 408).
+
+        The cloud's passthrough to a camera intermittently answers 408 while
+        the camera is otherwise fine, so a 408 is retried after a short pause,
+        up to ``len(MOTOR_RETRY_DELAYS)`` times. Every 408 is logged with the
+        cloud's own message. Any other error is raised at once.
+
+        Caveat: pan and tilt are relative moves. If the gateway timed out
+        *after* the camera had already moved, a retry moves it again. The
+        408s seen so far coincide with the camera being unreachable through the
+        passthrough, when the first attempt never arrived.
+        """
+        for attempt, delay in enumerate((*MOTOR_RETRY_DELAYS, None), start=1):
+            try:
+                return await command()
+            except CloudError as err:
+                if getattr(err, "status_code", None) != 408:
+                    _reraise(err)
+                _LOGGER.warning(
+                    "Cloud timed out (HTTP 408) on %s for %s, attempt %d: %s",
+                    what,
+                    self._info.name,
+                    attempt,
+                    getattr(err, "message", "") or "(empty response body)",
+                )
+                if delay is None:
+                    _reraise(err)
+                await asyncio.sleep(delay)
+            except Exception as err:  # noqa: BLE001
+                _reraise(err)
+        return None  # unreachable: the last attempt raises or returns
 
     async def async_presets(self) -> list[tuple[str, str]]:
         try:
@@ -712,7 +772,7 @@ class TapoCloudCamera:
         except UnsupportedMethod:
             return []
         except Exception as err:  # noqa: BLE001
-            raise _map_error(err) from err
+            _reraise(err)
 
     async def async_set_privacy_mode(self, enabled: bool) -> None:
         """Attempt to set privacy mode.
@@ -731,4 +791,4 @@ class TapoCloudCamera:
         try:
             return await coro
         except Exception as err:  # noqa: BLE001
-            raise _map_error(err) from err
+            _reraise(err)

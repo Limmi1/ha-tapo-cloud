@@ -4,17 +4,25 @@
       "user": {
         "title": "Tapo account",
         "description": "Sign in with the TP-Link Tapo account that owns the cameras. Your password is used once to obtain a session token and is not stored.",
-        "data": { "email": "Email", "password": "Password" }
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
       },
       "mfa": {
         "title": "Two-factor verification",
         "description": "Enter the verification code sent to {email}.",
-        "data": { "code": "Verification code" }
+        "data": {
+          "code": "Verification code"
+        }
       },
       "reauth_confirm": {
         "title": "Sign in again",
         "description": "The stored session for {email} expired and could not be renewed.",
-        "data": { "email": "Email", "password": "Password" }
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
       }
     },
     "error": {
@@ -37,45 +45,77 @@
         "data": {
           "resolution": "Live stream quality",
           "snapshot_interval": "Minimum seconds between snapshots",
-          "relay_host": "Relay region host"
+          "relay_host": "Relay region host",
+          "live_width": "Live view width",
+          "live_fps": "Live view frame rate"
         },
         "data_description": {
           "snapshot_interval": "A snapshot opens a short relay session and decodes a frame, so it is cached for this long.",
-          "relay_host": "Change this only if live view fails with a relay error. The default covers ap-southeast-1."
+          "relay_host": "Change this only if live view fails with a relay error. The default covers ap-southeast-1.",
+          "live_width": "Live frames are scaled down to this width, keeping the aspect ratio. 0 keeps the camera's full resolution (2304 px on many models, much more bandwidth).",
+          "live_fps": "Maximum frames per second in live view. 0 keeps the camera's own rate (around 14-15 fps)."
         }
       }
     }
   },
   "entity": {
     "binary_sensor": {
-      "privacy_mode": { "name": "Privacy mode" },
-      "motion_detection": { "name": "Motion detection" },
-      "sd_card": { "name": "SD card problem" }
+      "privacy_mode": {
+        "name": "Privacy mode"
+      },
+      "motion_detection": {
+        "name": "Motion detection"
+      },
+      "sd_card": {
+        "name": "SD card problem"
+      }
     },
     "switch": {
-      "privacy_mode": { "name": "Privacy mode" }
+      "privacy_mode": {
+        "name": "Privacy mode"
+      }
     }
   },
   "services": {
     "pan": {
       "name": "Pan",
       "description": "Pan the camera by a relative number of steps. 10 is a nudge, 150 a large sweep.",
-      "fields": { "steps": { "name": "Steps", "description": "Positive and negative pan in opposite directions." } }
+      "fields": {
+        "steps": {
+          "name": "Steps",
+          "description": "Positive and negative pan in opposite directions."
+        }
+      }
     },
     "tilt": {
       "name": "Tilt",
       "description": "Tilt the camera by a relative number of steps.",
-      "fields": { "steps": { "name": "Steps", "description": "Positive tilts the view up." } }
+      "fields": {
+        "steps": {
+          "name": "Steps",
+          "description": "Positive tilts the view up."
+        }
+      }
     },
     "move_to_preset": {
       "name": "Move to preset",
       "description": "Move the camera to one of its saved preset positions.",
-      "fields": { "preset": { "name": "Preset", "description": "The preset id, as saved on the camera." } }
+      "fields": {
+        "preset": {
+          "name": "Preset",
+          "description": "The preset id, as saved on the camera."
+        }
+      }
     },
     "set_privacy_mode": {
       "name": "Set privacy mode",
       "description": "Attempt to turn privacy mode on or off. The Tapo cloud currently rejects setting changes; pan, tilt and presets are unaffected.",
-      "fields": { "enabled": { "name": "Enabled", "description": "Whether privacy mode should be on." } }
+      "fields": {
+        "enabled": {
+          "name": "Enabled",
+          "description": "Whether privacy mode should be on."
+        }
+      }
     }
   }
 }

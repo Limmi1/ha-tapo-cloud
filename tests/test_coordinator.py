@@ -15,7 +15,11 @@ from custom_components.tapo_cloud.coordinator import TapoCloudCoordinator
 def _coordinator(hass, camera, account=None):
     from custom_components.tapo_cloud.api import CameraInfo
 
-    account = account or MagicMock()
+    if account is None:
+        account = MagicMock()
+        account.media_ok_within = MagicMock(return_value=False)  # no recent video
+    elif not isinstance(account.media_ok_within.return_value, bool):
+        account.media_ok_within = MagicMock(return_value=False)
     account.camera.return_value = camera
     info = CameraInfo(
         device_id="D1", name="Garden", model="C216", app_server="aps1.example.com"
@@ -95,3 +99,91 @@ async def test_availability_recovers_on_the_next_successful_poll(
 
     await coordinator.async_refresh()
     assert coordinator.available is True
+
+
+# -- riding out a flaky status check (0.1.8) ----------------------------------
+
+from custom_components.tapo_cloud.const import (  # noqa: E402
+    MEDIA_PROOF_SECONDS,
+    OFFLINE_AFTER_FAILURES,
+)
+
+GOOD = {"available": True, "privacy_mode": False, "motion_detection": {"enabled": "on"}}
+OFFLINE = {"available": False}
+
+
+async def test_one_failed_poll_keeps_the_camera_available_with_its_last_state(
+    hass: HomeAssistant,
+):
+    camera = MagicMock()
+    camera.async_poll = AsyncMock(side_effect=[GOOD, OFFLINE])
+    coordinator = _coordinator(hass, camera)
+
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+
+    assert coordinator.available is True
+    assert coordinator.data["privacy_mode"] is False  # carried over, not blanked
+
+
+async def test_repeated_failures_make_it_unavailable(hass: HomeAssistant):
+    camera = MagicMock()
+    camera.async_poll = AsyncMock(side_effect=[GOOD] + [OFFLINE] * OFFLINE_AFTER_FAILURES)
+    coordinator = _coordinator(hass, camera)
+
+    await coordinator.async_refresh()
+    for _ in range(OFFLINE_AFTER_FAILURES - 1):
+        await coordinator.async_refresh()
+        assert coordinator.available is True
+    await coordinator.async_refresh()
+    assert coordinator.available is False
+
+
+async def test_cloud_errors_inside_the_grace_period_do_not_fail_the_update(
+    hass: HomeAssistant,
+):
+    camera = MagicMock()
+    camera.async_poll = AsyncMock(
+        side_effect=[GOOD] + [CloudTransportError("HTTP 408")] * OFFLINE_AFTER_FAILURES
+    )
+    coordinator = _coordinator(hass, camera)
+    await coordinator.async_refresh()
+
+    for _ in range(OFFLINE_AFTER_FAILURES - 1):
+        data = await coordinator._async_update_data()  # no exception
+        assert data["privacy_mode"] is False
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+
+
+async def test_a_good_poll_resets_the_failure_count(hass: HomeAssistant):
+    camera = MagicMock()
+    sequence = [GOOD] + [OFFLINE] * (OFFLINE_AFTER_FAILURES - 1) + [GOOD] + [OFFLINE] * (OFFLINE_AFTER_FAILURES - 1)
+    camera.async_poll = AsyncMock(side_effect=sequence)
+    coordinator = _coordinator(hass, camera)
+    for _ in sequence:
+        await coordinator.async_refresh()
+    assert coordinator.available is True
+
+
+async def test_recent_video_proves_the_camera_online_whatever_the_poll_says(
+    hass: HomeAssistant,
+):
+    camera = MagicMock()
+    camera.async_poll = AsyncMock(return_value=OFFLINE)
+    account = MagicMock()
+    account.media_ok_within = MagicMock(return_value=True)
+    coordinator = _coordinator(hass, camera, account)
+
+    for _ in range(OFFLINE_AFTER_FAILURES + 2):
+        await coordinator.async_refresh()
+    assert coordinator.available is True
+    account.media_ok_within.assert_called_with(coordinator.info.stream_device_id, MEDIA_PROOF_SECONDS)
+
+
+async def test_a_camera_never_seen_online_is_unavailable(hass: HomeAssistant):
+    camera = MagicMock()
+    camera.async_poll = AsyncMock(return_value=OFFLINE)
+    coordinator = _coordinator(hass, camera)
+    await coordinator.async_refresh()
+    assert coordinator.available is False

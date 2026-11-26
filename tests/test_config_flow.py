@@ -200,7 +200,7 @@ async def test_options_flow_offers_quality_cadence_and_region(
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert result["type"] is FlowResultType.FORM
     keys = {str(key) for key in result["data_schema"].schema}
-    assert {"resolution", "snapshot_interval", "relay_host"} <= keys
+    assert {"resolution", "snapshot_interval", "relay_host", "live_width", "live_fps"} <= keys
 
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],

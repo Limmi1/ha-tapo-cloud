@@ -33,6 +33,19 @@ DEFAULT_SNAPSHOT_SECONDS: Final = 4.0
 
 UPDATE_INTERVAL: Final = timedelta(minutes=2)
 
+# Availability. The cloud's status passthrough fails intermittently even while
+# video works, so a camera is only unavailable after this many failed polls in
+# a row (about six minutes at the interval above)...
+OFFLINE_AFTER_FAILURES: Final = 3
+# ...and video or a snapshot from it within this many seconds proves it online.
+MEDIA_PROOF_SECONDS: Final = 300.0
+
+# Live view (options). 0 means "leave as the camera sends it".
+CONF_LIVE_WIDTH: Final = "live_width"
+CONF_LIVE_FPS: Final = "live_fps"
+DEFAULT_LIVE_WIDTH: Final = 1280
+DEFAULT_LIVE_FPS: Final = 5
+
 # The relay-negotiation host OnTapo 0.1.0 hardcodes (ap-southeast-1). Other
 # regions use the same path under a different prefix; exposed as an option
 # because a wrong region is the most likely cause of a relay failure.

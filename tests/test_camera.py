@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from homeassistant.components.camera import async_get_image
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -376,3 +378,198 @@ async def test_the_very_first_frame_is_waited_for(
     await _setup(hass, entry_data, mock_account)
     _writes_jpeg(mock_account, ptz_camera_info.device_id)
     assert (await async_get_image(hass, "camera.garden")).content == JPEG
+
+
+# -- live view: cached frame first, scale and frame-rate caps (0.1.8) -----------
+
+def test_live_filters_are_added_only_when_configured():
+    from custom_components.tapo_cloud.camera import _ffmpeg_args
+
+    args = _ffmpeg_args(1, 1280, 5)
+    vf = args[args.index("-vf") + 1]
+    assert vf == "fps=5,scale=min(1280\\,iw):-2"
+    # The filter sits after the input and stream selection, before the output.
+    assert args.index("-map") < args.index("-vf") < args.index("mpjpeg")
+    assert "-vf" not in _ffmpeg_args(0, 0, 0)
+    assert _ffmpeg_args(0, 0, 3)[_ffmpeg_args(0, 0, 3).index("-vf") + 1] == "fps=3"
+
+
+async def test_live_scaling_and_frame_rate_with_real_ffmpeg():
+    """1080p at 15 fps in; frames no wider than 1280 at about 5 fps out."""
+    import io
+    import shutil
+
+    from PIL import Image
+
+    from custom_components.tapo_cloud.camera import _MJPEG_BOUNDARY, _ffmpeg_args
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg not installed")
+    make = await asyncio.create_subprocess_exec(
+        ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=1920x1080:rate=15",
+        "-t", "2", "-c:v", "libx264", "-f", "mpegts", "pipe:1",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    ts, _ = await make.communicate()
+    if make.returncode != 0 or not ts:
+        pytest.skip("this ffmpeg cannot encode a test stream")
+
+    run = await asyncio.create_subprocess_exec(
+        ffmpeg, *_ffmpeg_args(0, 1280, 5),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await run.communicate(ts)
+    assert run.returncode == 0, err.decode()
+
+    frames = [part for part in out.split(f"--{_MJPEG_BOUNDARY}".encode()) if b"\xff\xd8" in part]
+    assert 8 <= len(frames) <= 12, len(frames)  # ~5 fps over 2 s, not ~30
+    first = frames[0][frames[0].index(b"\xff\xd8"):]
+    with Image.open(io.BytesIO(first)) as image:
+        assert image.size == (1280, 720)
+
+
+async def test_live_scaling_never_enlarges_a_smaller_stream():
+    import io
+    import shutil
+
+    from PIL import Image
+
+    from custom_components.tapo_cloud.camera import _ffmpeg_args
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg not installed")
+    make = await asyncio.create_subprocess_exec(
+        ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=10",
+        "-t", "1", "-c:v", "libx264", "-f", "mpegts", "pipe:1",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    ts, _ = await make.communicate()
+    if make.returncode != 0 or not ts:
+        pytest.skip("this ffmpeg cannot encode a test stream")
+    run = await asyncio.create_subprocess_exec(
+        ffmpeg, *_ffmpeg_args(0, 1280, 5),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await run.communicate(ts)
+    first = out[out.index(b"\xff\xd8"):]
+    with Image.open(io.BytesIO(first)) as image:
+        assert image.size == (640, 360)
+
+
+def test_the_cached_frame_part_is_framed_like_ffmpeg_output():
+    from custom_components.tapo_cloud.camera import _MJPEG_BOUNDARY, _mjpeg_part
+
+    part = _mjpeg_part(JPEG)
+    assert part.startswith(f"--{_MJPEG_BOUNDARY}\r\n".encode())
+    assert f"Content-length: {len(JPEG)}\r\n\r\n".encode() in part
+    assert part.endswith(JPEG + b"\r\n")
+
+
+async def test_live_view_sends_the_last_frame_before_live_frames(
+    hass: HomeAssistant, entry_data, mock_account
+):
+    """Opening live view shows the cached frame at once, then ffmpeg's output."""
+    from custom_components.tapo_cloud.camera import _mjpeg_part
+
+    await _setup(hass, entry_data, mock_account)
+    entity = hass.data["camera"].get_entity("camera.garden")
+    entity._snapshot = JPEG
+
+    async def fake_stream(resolution="HD"):
+        yield b"\x47ts"
+
+    entity.coordinator.camera.iter_live_ts = fake_stream
+    live = [b"--frame\r\n", b"\xff\xd8live\xff\xd9", b""]
+    spawned: list[tuple] = []
+
+    class FakeStdout:
+        async def read(self, _size):
+            return live.pop(0)
+
+    class FakeStdin:
+        def write(self, data):
+            return None
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+    class FakeProcess:
+        stdin = FakeStdin()
+        stdout = FakeStdout()
+
+        def kill(self):
+            return None
+
+        async def wait(self):
+            return 0
+
+    async def spawn(*args, **kwargs):
+        spawned.append(args)
+        return FakeProcess()
+
+    written: list[bytes] = []
+
+    class FakeResponse:
+        def __init__(self, headers=None):
+            self.headers = headers or {}
+
+        async def prepare(self, request):
+            return None
+
+        async def write(self, data):
+            written.append(data)
+
+        async def write_eof(self):
+            return None
+
+    with (
+        patch("custom_components.tapo_cloud.camera.asyncio.create_subprocess_exec", spawn),
+        patch("custom_components.tapo_cloud.camera.web.StreamResponse", FakeResponse),
+        patch("custom_components.tapo_cloud.camera.get_ffmpeg_manager") as manager,
+    ):
+        manager.return_value.binary = "ffmpeg"
+        await entity.handle_async_mjpeg_stream(object())
+        await asyncio.sleep(0)
+
+    assert written[0] == _mjpeg_part(JPEG)
+    assert written[1:] == [b"--frame\r\n", b"\xff\xd8live\xff\xd9"]
+    # Defaults: 1280 px wide, 5 fps.
+    vf = spawned[0][spawned[0].index("-vf") + 1]
+    assert vf == "fps=5,scale=min(1280\\,iw):-2"
+
+
+async def test_live_view_ffmpeg_produces_frames_with_default_settings():
+    """Regression: before 0.1.8 live view's ffmpeg command produced no frames.
+
+    "-fflags nobuffer" stopped piped MPEG-TS decoding, and the MJPEG encoder
+    rejected limited-range video. Real ffmpeg, camera-like H.264 (no B-frames).
+    """
+    import shutil
+
+    from custom_components.tapo_cloud.camera import _ffmpeg_args
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg not installed")
+    make = await asyncio.create_subprocess_exec(
+        ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=10",
+        "-t", "2", "-c:v", "libx264", "-bf", "0", "-f", "mpegts", "pipe:1",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    ts, _ = await make.communicate()
+    if make.returncode != 0 or not ts:
+        pytest.skip("this ffmpeg cannot encode a test stream")
+    for width, fps in ((0, 0), (1280, 5)):
+        run = await asyncio.create_subprocess_exec(
+            ffmpeg, *_ffmpeg_args(0, width, fps),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await run.communicate(ts)
+        assert run.returncode == 0, err.decode()
+        assert out.count(b"\xff\xd8\xff") >= 8, (width, fps, err.decode()[:200])
+

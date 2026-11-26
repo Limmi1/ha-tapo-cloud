@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.8] - 2026-11-26
+
+### Fixed
+
+- **Cameras flapping between available and unavailable.** A single failed
+  status check from the cloud (often HTTP 408) marked a camera unavailable.
+  Home Assistant then revoked its access token, so open live views went
+  blank even though the video relay was still working. A camera now goes
+  unavailable only after three failed checks in a row, keeps its last good
+  state meanwhile, and stays available whenever video or a snapshot from it
+  arrived in the last five minutes. Every camera and lens follows the same
+  rule.
+- **Motor commands failing with HTTP 408.** Pan, tilt and presets now retry
+  a cloud timeout twice (after 0.5 s and 1.5 s) and log the cloud's message
+  each time.
+- **Live view could produce no frames with newer ffmpeg.** The live-view
+  ffmpeg command used `-fflags nobuffer`, which stops ffmpeg 8 decoding
+  piped video at all, and didn't request full-range output, which ffmpeg 8's
+  MJPEG encoder requires. Both are fixed, and tested against real ffmpeg.
+- Cloud errors are now classified by HTTP status code. A message that merely
+  contained "400" could previously be mistaken for a refused setting change.
+
+### Added
+
+- Live view sends the last frame immediately, then switches to live frames.
+- Options for live view width (default 1280 px, never upscaling) and frame
+  rate (default 5 fps). The camera's native stream is about 3.5 MB/s per
+  viewer; the defaults cut that to roughly a tenth. Set either to 0 to keep
+  the camera's own value.
+
 ## [0.1.7] - 2026-11-26
 
 ### Changed
@@ -148,6 +178,7 @@ All notable changes to this project are documented here. The format follows
   and the server reports refusals as HTTP 200, which looked like success.
 - Codes typed with a separator, such as `150-791`, were rejected.
 
+[0.1.8]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.8
 [0.1.7]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.7
 [0.1.6]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.6
 [0.1.5]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.5
