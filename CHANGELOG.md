@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.6] - 2026-11-26
+
+### Fixed
+
+- **Pan and tilt were refused on cameras that do have a motor.** The services
+  checked a capability flag from discovery first, and that flag relies on the
+  camera listing a `ptz` component. Some models, including at least one
+  dual-lens camera, report their motor differently. The services now send
+  the move and let the camera decide. If the camera answers "unsupported",
+  you get a clear "has no pan/tilt motor" error. Pan and tilt on a lens of a
+  multi-lens camera go to the parent device, which owns the motor.
+
 ## [0.1.5] - 2026-11-26
 
 ### Fixed
@@ -124,6 +136,7 @@ All notable changes to this project are documented here. The format follows
   and the server reports refusals as HTTP 200, which looked like success.
 - Codes typed with a separator, such as `150-791`, were rejected.
 
+[0.1.6]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.6
 [0.1.5]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.5
 [0.1.4]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.4
 [0.1.3]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.3

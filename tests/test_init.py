@@ -70,19 +70,31 @@ async def test_pan_service_reaches_the_camera(
     mock_account.cameras[ptz_camera_info.device_id].async_pan.assert_awaited_once_with(80)
 
 
-async def test_pan_is_refused_on_a_camera_with_no_motor(
-    hass: HomeAssistant, entry_data, mock_account
+async def test_pan_is_sent_even_when_discovery_found_no_motor(
+    hass: HomeAssistant, entry_data, mock_account, fixed_camera_info
+):
+    """Discovery's capability test misses some PTZ models; let the camera decide."""
+    await _setup(hass, entry_data, mock_account)
+    assert fixed_camera_info.has_ptz is False
+    await hass.services.async_call(
+        DOMAIN, "pan", {"entity_id": "camera.garage", "steps": 10}, blocking=True
+    )
+    mock_account.cameras[fixed_camera_info.device_id].async_pan.assert_awaited_once_with(10)
+
+
+async def test_a_camera_that_says_unsupported_gets_a_clear_error(
+    hass: HomeAssistant, entry_data, mock_account, fixed_camera_info
 ):
     import pytest
-    from homeassistant.exceptions import ServiceValidationError
+    from homeassistant.exceptions import HomeAssistantError
+    from ontapo import UnsupportedMethod
 
     await _setup(hass, entry_data, mock_account)
-    with pytest.raises(ServiceValidationError, match="no pan/tilt motor"):
+    camera = mock_account.cameras[fixed_camera_info.device_id]
+    camera.async_tilt = AsyncMock(side_effect=UnsupportedMethod("-40101"))
+    with pytest.raises(HomeAssistantError, match="has no pan/tilt motor"):
         await hass.services.async_call(
-            DOMAIN,
-            "pan",
-            {"entity_id": "camera.garage", "steps": 10},
-            blocking=True,
+            DOMAIN, "tilt", {"entity_id": "camera.garage", "steps": 10}, blocking=True
         )
 
 

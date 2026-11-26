@@ -10,7 +10,12 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 
-from .api import CloudSetterRejected, CloudTransportError, OnTapoError
+from .api import (
+    CloudSetterRejected,
+    CloudTransportError,
+    OnTapoError,
+    UnsupportedMethod,
+)
 from .const import (
     ATTR_ENABLED,
     ATTR_PRESET,
@@ -75,6 +80,16 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     async def _run(coordinator: TapoCloudCoordinator, action: str, *args: object) -> None:
         try:
             await getattr(coordinator.camera, action)(*args)
+        except UnsupportedMethod as err:
+            # The camera itself answered "unsupported" (-40101).
+            feature = (
+                "pan/tilt motor"
+                if action in ("async_pan", "async_tilt", "async_move_to_preset")
+                else "feature"
+            )
+            raise HomeAssistantError(
+                f"{coordinator.info.name} has no {feature} (the camera says so)"
+            ) from err
         except CloudSetterRejected as err:
             raise HomeAssistantError(
                 "The Tapo cloud rejected this setting change before the camera "
@@ -84,19 +99,19 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             raise HomeAssistantError(f"Tapo Cloud command failed: {err}") from err
 
     async def handle_pan(call: ServiceCall) -> None:
+        # No up-front capability check: discovery's "ptz" component test misses
+        # some models (a dual-lens camera reports its motor differently), so the
+        # camera decides, and an "unsupported" answer becomes a clear error.
+        # A lens of a multi-lens camera is sent to its parent, which owns the motor.
         for coordinator in _coordinators_for(hass, call):
-            if not coordinator.info.has_ptz:
-                raise ServiceValidationError(
-                    f"{coordinator.info.name} has no pan/tilt motor"
-                )
             await _run(coordinator, "async_pan", call.data[ATTR_STEPS])
 
     async def handle_tilt(call: ServiceCall) -> None:
+        # No up-front capability check: discovery's "ptz" component test misses
+        # some models (a dual-lens camera reports its motor differently), so the
+        # camera decides, and an "unsupported" answer becomes a clear error.
+        # A lens of a multi-lens camera is sent to its parent, which owns the motor.
         for coordinator in _coordinators_for(hass, call):
-            if not coordinator.info.has_ptz:
-                raise ServiceValidationError(
-                    f"{coordinator.info.name} has no pan/tilt motor"
-                )
             await _run(coordinator, "async_tilt", call.data[ATTR_STEPS])
 
     async def handle_preset(call: ServiceCall) -> None:
