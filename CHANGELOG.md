@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-11-26
+
+### Fixed
+
+- Snapshots never recovered when the cloud relay rejected the session token
+  while other cloud calls still accepted it. A relay refusal now renews the
+  token once and retries the snapshot.
+
+### Changed
+
+- Experimental: individual lenses of multi-lens cameras are kept available.
+  The cloud lists each lens as its own device but refuses settings reads for
+  it ("Thing doesn't belong to user's account"), which marked every lens
+  unavailable so its snapshot was never tried. Lenses now stay available so
+  the relay can be tried; their privacy and motion state reads as unknown.
+
 ## [0.1.0] - 2026-11-26
 
 ### Added
@@ -27,4 +43,5 @@ All notable changes to this project are documented here. The format follows
   and the server reports refusals as HTTP 200, which looked like success.
 - Codes typed with a separator, such as `150-791`, were rejected.
 
+[0.1.1]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.0

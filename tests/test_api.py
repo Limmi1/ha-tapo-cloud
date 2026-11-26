@@ -260,3 +260,77 @@ async def test_send_mfa_code_succeeds_on_a_clean_body():
     session._client.post = AsyncMock(return_value=resp)
 
     await async_send_mfa_code(session, "pw", mfa_type=2)  # no raise
+
+
+def _camera_with(device):
+    """A TapoCloudCamera over a mocked device, with a mockable token refresh."""
+    session = MagicMock()
+    session.device.return_value = device
+    account = TapoCloudAccount(session)
+    account.async_refresh_token = AsyncMock()
+    info = CameraInfo(device_id="D", name="n", model="m", app_server="a")
+    return account, account.camera(info)
+
+
+async def test_snapshot_refreshes_the_token_once_when_the_relay_refuses_it():
+    """Passthrough can keep working while the relay returns 401; renew and retry."""
+    device = MagicMock()
+    device.snapshot = AsyncMock(
+        side_effect=[Unauthorized("relay request unauthorized"), "/tmp/frame.jpg"]
+    )
+    account, camera = _camera_with(device)
+
+    assert await camera.async_snapshot("/tmp/frame.jpg") == "/tmp/frame.jpg"
+    account.async_refresh_token.assert_awaited_once()
+    assert device.snapshot.await_count == 2
+
+
+async def test_snapshot_does_not_refresh_for_errors_other_than_auth():
+    device = MagicMock()
+    device.snapshot = AsyncMock(side_effect=RelayError("relay down"))
+    account, camera = _camera_with(device)
+
+    with pytest.raises(CloudTransportError):
+        await camera.async_snapshot("/tmp/frame.jpg")
+    account.async_refresh_token.assert_not_awaited()
+    assert device.snapshot.await_count == 1
+
+
+async def test_snapshot_gives_up_after_one_refresh():
+    """A second refusal after renewing is raised, not retried forever."""
+    device = MagicMock()
+    device.snapshot = AsyncMock(side_effect=Unauthorized("relay request unauthorized"))
+    account, camera = _camera_with(device)
+
+    with pytest.raises(CloudAuthError):
+        await camera.async_snapshot("/tmp/frame.jpg")
+    account.async_refresh_token.assert_awaited_once()
+    assert device.snapshot.await_count == 2
+
+
+async def test_poll_keeps_a_lens_the_cloud_will_not_passthrough_to_available():
+    """A multi-lens camera's lens things refuse passthrough but may still stream."""
+    device = MagicMock()
+    device.device_info = AsyncMock(
+        side_effect=CloudError("Thing doesn't belong to user's account")
+    )
+    device.get_privacy_mode = AsyncMock()
+    device.get_motion_detection = AsyncMock()
+    _, camera = _camera_with(device)
+
+    state = await camera.async_poll()
+
+    assert state["available"] is True
+    assert state["device_info"] is None
+    # It returns early: privacy and motion are left unknown, not queried.
+    device.get_privacy_mode.assert_not_awaited()
+    device.get_motion_detection.assert_not_awaited()
+    assert "privacy_mode" not in state
+
+
+async def test_poll_still_marks_other_device_info_failures_unavailable():
+    device = MagicMock()
+    device.device_info = AsyncMock(side_effect=CloudError("gateway timeout"))
+    _, camera = _camera_with(device)
+
+    assert (await camera.async_poll())["available"] is False

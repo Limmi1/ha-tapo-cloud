@@ -388,6 +388,16 @@ class TapoCloudCamera:
         try:
             return await self._device.snapshot(out_path, seconds=seconds)
         except Exception as err:  # noqa: BLE001
+            mapped = _map_error(err)
+            if not isinstance(mapped, CloudAuthError):
+                raise mapped from err
+        # The relay can refuse a token that the passthrough API still accepts,
+        # so renew it once and retry before giving up.
+        _LOGGER.debug("relay refused the token for %s; refreshing", self.device_id)
+        await self._account.async_refresh_token()
+        try:
+            return await self._device.snapshot(out_path, seconds=seconds)
+        except Exception as err:  # noqa: BLE001
             raise _map_error(err) from err
 
     # -- state ----------------------------------------------------------
@@ -400,6 +410,7 @@ class TapoCloudCamera:
         ``None`` rather than failing the whole poll.
         """
         state: dict[str, Any] = {"available": False}
+        info_errors: list[str] = []
 
         async def attempt(key: str, coro: Awaitable[Any]) -> None:
             try:
@@ -408,10 +419,18 @@ class TapoCloudCamera:
                 state[key] = None
             except (DeviceError, CloudError, OnTapoError) as err:
                 _LOGGER.debug("%s read failed for %s: %s", key, self.device_id, err)
+                if key == "device_info":
+                    info_errors.append(str(err))
                 state[key] = None
 
         await attempt("device_info", self._device.device_info())
         state["available"] = state.get("device_info") is not None
+        if not state["available"] and any("belong" in e for e in info_errors):
+            # A lens of a multi-lens camera (e.g. C545D) is listed by the cloud as
+            # its own thing, but passthrough to it is refused. Its video may still
+            # be reachable over the relay, so keep it available for snapshots.
+            state["available"] = True
+            return state
         if not state["available"]:
             return state
 
