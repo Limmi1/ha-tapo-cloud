@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 from ontapo import RelayError
 from ontapo.relay import StreamType, request_relay
@@ -65,10 +66,28 @@ def assert_ontapo_compatible() -> None:
         )
 
 
+def with_channel(relay_url: str, channel: int) -> str:
+    """Add ``channel=<n>`` to a relay URL's query unless it already has one.
+
+    The Tapo app requests ``/relayservice?deviceid=…&type=…&resolution=…&channel=%d``
+    and picks a multi-lens camera's lens by channel on the parent device. The
+    cloud's ``relayUrl`` carries an opaque routing query; this keeps that query
+    as-is and only appends the channel when it is absent.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    parsed = urlparse(relay_url)
+    if "channel" in parse_qs(parsed.query, keep_blank_values=True):
+        return relay_url
+    separator = "&" if parsed.query else ("" if relay_url.endswith("?") else "?")
+    return f"{relay_url}{separator}channel={int(channel)}"
+
+
 async def iter_live_ts(
     session: object,
     device_id: str,
     *,
+    channel: int = 0,
     resolution: str = "HD",
     idle_timeout: float | None = None,
 ) -> AsyncIterator[bytes]:
@@ -80,7 +99,10 @@ async def iter_live_ts(
 
     Args:
         session: an :class:`ontapo.OnTapo` logged-in session.
-        device_id: the camera's cloud device id.
+        device_id: the cloud device id the relay is negotiated for. For a lens
+            of a multi-lens camera this is the **parent** device's id.
+        channel: which video channel to stream. ``0`` for a single-lens camera;
+            for a multi-lens camera, the lens number.
         resolution: relay stream profile, ``"HD"`` or ``"VGA"``.
         idle_timeout: seconds of silence that end the stream. Defaults to
             OnTapo's own ``_IDLE_GAP``.
@@ -94,8 +116,12 @@ async def iter_live_ts(
     assert_ontapo_compatible()
     gap = _s._IDLE_GAP if idle_timeout is None else idle_timeout
 
-    track_id = f"ha-preview-{device_id}"
+    channel = int(channel)
+    # One track per (device, channel), so two lenses of one camera never share
+    # a relay session.
+    track_id = f"ha-preview-{device_id}-ch{channel}"
     relay = await request_relay(session, device_id, StreamType.PREVIEW, track_id)
+    relay = replace(relay, relay_url=with_channel(relay.relay_url, channel))
     terminal_uuid = session.terminal_uuid  # type: ignore[attr-defined]
 
     reader, writer, host, req_path = await _s._open_relay(relay, terminal_uuid, track_id)
@@ -103,7 +129,7 @@ async def iter_live_ts(
         writer.write(_s._relay_head(relay, terminal_uuid, track_id, req_path, host).encode())
         preview_req = (
             '{"type":"request","seq":1,"params":{"preview":'
-            f'{{"audio":["default"],"channels":[0],"resolutions":["{resolution}"]}},'
+            f'{{"audio":["default"],"channels":[{channel}],"resolutions":["{resolution}"]}},'
             '"method":"get"}}'
         )
         writer.write(_s._control_frame(preview_req))

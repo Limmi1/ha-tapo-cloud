@@ -63,6 +63,8 @@ def fake_relay(monkeypatch):
         return RELAY
 
     async def fake_open_relay(relay, terminal_uuid, track_id):
+        state["opened_relay"] = relay
+        state["opened_track"] = track_id
         return object(), state["writer"], "relay.example.com", "/relayservice?route=xyz"
 
     async def fake_read_status(reader):
@@ -109,7 +111,7 @@ async def test_requests_the_preview_stream_type(fake_relay):
     device_id, stream_type, track_id = fake_relay["requested"]
     assert device_id == "DEV1"
     assert stream_type == 0  # StreamType.PREVIEW — live, not playback
-    assert track_id == "ha-preview-DEV1"
+    assert track_id == "ha-preview-DEV1-ch0"
 
 
 async def test_control_frame_asks_for_the_requested_resolution(fake_relay):
@@ -171,3 +173,51 @@ def test_compatibility_guard_fails_on_a_missing_internal(monkeypatch):
     monkeypatch.delattr(ontapo_stream, "_read_part")
     with pytest.raises(IncompatibleOnTapo, match="_read_part"):
         assert_ontapo_compatible()
+
+
+async def test_the_control_frame_asks_for_the_requested_channel(fake_relay):
+    fake_relay["parts"] = [("video/mp2t", b"\x47x")]
+    await _collect(channel=1)
+    assert b'"channels":[1]' in fake_relay["writer"].written
+    assert b'"channels":[0]' not in fake_relay["writer"].written
+
+
+async def test_the_default_channel_is_zero(fake_relay):
+    fake_relay["parts"] = [("video/mp2t", b"\x47x")]
+    await _collect()
+    assert b'"channels":[0]' in fake_relay["writer"].written
+
+
+async def test_the_request_path_carries_the_channel(fake_relay):
+    fake_relay["parts"] = [("video/mp2t", b"\x47x")]
+    await _collect(channel=1)
+    assert fake_relay["opened_relay"].relay_url == (
+        "https://relay.example.com/relayservice?route=xyz&channel=1"
+    )
+
+
+async def test_two_lenses_get_separate_tracks(fake_relay):
+    """Lenses share a parent device id, so the track id must include the channel."""
+    fake_relay["parts"] = [("video/mp2t", b"\x47x")]
+    await _collect(channel=0)
+    first = fake_relay["opened_track"]
+    fake_relay["parts"] = [("video/mp2t", b"\x47x")]
+    await _collect(channel=1)
+    assert first != fake_relay["opened_track"]
+    assert fake_relay["opened_track"] == "ha-preview-DEV1-ch1"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://r.example/relayservice?route=xyz", "https://r.example/relayservice?route=xyz&channel=1"),
+        ("https://r.example/relayservice", "https://r.example/relayservice?channel=1"),
+        ("https://r.example/relayservice?", "https://r.example/relayservice?channel=1"),
+        # An existing channel is left exactly as the cloud sent it.
+        ("https://r.example/relayservice?channel=0&route=x", "https://r.example/relayservice?channel=0&route=x"),
+    ],
+)
+def test_with_channel(url, expected):
+    from custom_components.tapo_cloud.relay_stream import with_channel
+
+    assert with_channel(url, 1) == expected

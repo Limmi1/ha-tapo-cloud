@@ -16,8 +16,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
-import tempfile
 import time
 
 from aiohttp import web
@@ -28,7 +26,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .api import CloudTransportError, OnTapoError
+from .api import CloudAuthError, CloudTransportError, OnTapoError
 from .const import (
     CONF_RESOLUTION,
     CONF_SNAPSHOT_INTERVAL,
@@ -118,7 +116,7 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
 
             try:
                 image = await self._async_decode_snapshot()
-            except (CloudTransportError, OnTapoError, RuntimeError) as err:
+            except (CloudAuthError, CloudTransportError, OnTapoError, RuntimeError) as err:
                 _LOGGER.debug(
                     "snapshot failed for %s: %s", self.coordinator.info.device_id, err
                 )
@@ -130,20 +128,20 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
             return image
 
     async def _async_decode_snapshot(self) -> bytes:
-        """Pull a few seconds of live relay video and decode one JPEG from it."""
-        loop = asyncio.get_running_loop()
-        fd, path = await loop.run_in_executor(
-            None, lambda: tempfile.mkstemp(suffix=".jpg", prefix="tapo_cloud_")
-        )
-        await loop.run_in_executor(None, os.close, fd)
+        """Pull a few seconds of live relay video and decode one JPEG from it.
+
+        Everything goes over pipes, so there is no file I/O at all. For a lens
+        of a multi-lens camera, the handle streams the lens's own channel.
+        """
         try:
-            await self.coordinator.camera.async_snapshot(
-                path, seconds=DEFAULT_SNAPSHOT_SECONDS
-            )
-            return await loop.run_in_executor(None, _read_file, path)
-        finally:
-            with contextlib.suppress(OSError):
-                await loop.run_in_executor(None, os.unlink, path)
+            ffmpeg = get_ffmpeg_manager(self.hass).binary
+        except (KeyError, AttributeError):
+            ffmpeg = "ffmpeg"
+        return await self.coordinator.camera.async_snapshot(
+            ffmpeg=ffmpeg,
+            seconds=DEFAULT_SNAPSHOT_SECONDS,
+            resolution=self._resolution,
+        )
 
     async def handle_async_mjpeg_stream(
         self, request: web.Request
@@ -218,8 +216,3 @@ class TapoCloudCamera(TapoCloudEntity, Camera):
         finally:
             with contextlib.suppress(Exception):
                 stdin.close()
-
-
-def _read_file(path: str) -> bytes:
-    with open(path, "rb") as handle:
-        return handle.read()

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -51,6 +52,8 @@ __all__ = [
     "CloudTransportError",
     "CloudSetterRejected",
     "redact",
+    "map_lenses",
+    "decode_first_frame",
     "async_send_mfa_code",
     "async_submit_mfa",
     "AuthError",
@@ -118,7 +121,16 @@ class SessionTokens:
 
 @dataclass(frozen=True, slots=True)
 class CameraInfo:
-    """A camera discovered on the account."""
+    """A camera discovered on the account.
+
+    A multi-lens camera (a dual-lens model, for example) is listed by the
+    cloud as a parent thing plus one thing per lens, whose id is the parent's
+    id with a two-digit lens number appended. The cloud refuses passthrough to
+    a lens thing, and the relay refuses to stream it; the Tapo app instead
+    streams the **parent** device on the lens's **channel**. So for a lens,
+    ``relay_device_id`` is the parent's id and ``channel`` the lens number,
+    and every cloud call for it goes to the parent.
+    """
 
     device_id: str
     name: str
@@ -128,6 +140,38 @@ class CameraInfo:
     has_ptz: bool = False
     has_sd_card: bool = False
     features: frozenset[str] = field(default_factory=frozenset)
+    # Empty for an ordinary camera, meaning "use device_id".
+    relay_device_id: str = ""
+    channel: int = 0
+
+    @property
+    def stream_device_id(self) -> str:
+        """The device id to send relay and passthrough calls to."""
+        return self.relay_device_id or self.device_id
+
+    @property
+    def is_lens(self) -> bool:
+        """Whether this is one lens of a multi-lens camera."""
+        return bool(self.relay_device_id) and self.relay_device_id != self.device_id
+
+
+def map_lenses(device_ids: list[str]) -> dict[str, tuple[str, int]]:
+    """Find lens things: ``{lens_id: (parent_id, channel)}``.
+
+    A thing is a lens when its id is another discovered thing's id plus exactly
+    two digits; the digits are the channel (``"00"`` is 0, ``"01"`` is 1).
+    Only the id with its last two characters removed can be the parent, so a
+    match is never ambiguous.
+    """
+    ids = set(device_ids)
+    lenses: dict[str, tuple[str, int]] = {}
+    for thing in device_ids:
+        if len(thing) < 3:
+            continue
+        parent, suffix = thing[:-2], thing[-2:]
+        if suffix.isascii() and suffix.isdigit() and parent in ids:
+            lenses[thing] = (parent, int(suffix))
+    return lenses
 
 
 def _map_error(err: Exception) -> Exception:
@@ -144,6 +188,43 @@ def _map_error(err: Exception) -> Exception:
     if isinstance(err, RelayError):
         return CloudTransportError(str(err))
     return err
+
+
+# A media path that keeps getting refused renews the account token at most
+# this often (seconds), account-wide.
+TOKEN_REFRESH_MIN_INTERVAL = 300.0
+
+# How old a parent camera's poll may be for a lens to reuse it (seconds). The
+# coordinators all poll on the same interval, so a lens nearly always finds its
+# parent's result from moments earlier.
+LENS_POLL_SHARE_SECONDS = 60.0
+
+
+async def decode_first_frame(video: bytes, *, ffmpeg: str = "ffmpeg") -> bytes:
+    """Decode the first video frame of an MPEG-TS buffer to JPEG bytes.
+
+    Uses pipes for both input and output, so nothing touches the filesystem.
+    Raises ``RuntimeError`` if ffmpeg is missing or produces no image.
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg,
+            "-hide_banner", "-loglevel", "error",
+            "-f", "mpegts", "-i", "pipe:0",
+            "-frames:v", "1", "-q:v", "3",
+            "-f", "image2", "-c:v", "mjpeg", "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as err:
+        raise RuntimeError(f"ffmpeg not found at {ffmpeg!r}") from err
+    image, error = await process.communicate(video)
+    if process.returncode != 0 or not image:
+        raise RuntimeError(
+            f"ffmpeg could not decode a frame: {error.decode(errors='replace')[:200]}"
+        )
+    return image
 
 
 async def async_send_mfa_code(
@@ -222,6 +303,11 @@ class TapoCloudAccount:
     def __init__(self, session: OnTapo, *, relay_host: str | None = None) -> None:
         self._session = session
         self._lock = asyncio.Lock()
+        self._refresh_lock = asyncio.Lock()
+        self._clock: Callable[[], float] = time.monotonic
+        self._last_refresh: float | None = None
+        self._discovered: dict[str, CameraInfo] = {}
+        self._handles: dict[str, TapoCloudCamera] = {}
         if relay_host:
             self._apply_relay_host(relay_host)
 
@@ -296,12 +382,41 @@ class TapoCloudAccount:
         await self._session.aclose()
 
     async def async_refresh_token(self) -> SessionTokens:
-        """Renew the session token. Raises :class:`CloudAuthError` if refused."""
+        """Renew the session token. Raises :class:`CloudAuthError` if refused.
+
+        Every renewal, successful or not, is timestamped, so the throttled
+        variant below also counts renewals made by the polling coordinator.
+        """
+        self._last_refresh = self._clock()
         try:
             await self._session.refresh()
         except Exception as err:  # noqa: BLE001
             raise _map_error(err) from err
         return self.tokens
+
+    async def async_refresh_token_throttled(
+        self, min_interval: float = TOKEN_REFRESH_MIN_INTERVAL
+    ) -> bool:
+        """Renew the token unless it was renewed in the last ``min_interval`` s.
+
+        For media paths, where a relay refusal triggers a renewal: a relay that
+        keeps refusing would otherwise renew the account token on every snapshot
+        of every card — about every 30 s per card — which risks rate limiting or
+        locking the account. Returns ``True`` if a renewal happened, so the
+        caller retries once; ``False`` means a recent renewal did not help and
+        the caller should give up. Concurrent callers are serialised, so only
+        one of them renews.
+        """
+        async with self._refresh_lock:
+            now = self._clock()
+            if self._last_refresh is not None and now - self._last_refresh < min_interval:
+                _LOGGER.debug(
+                    "token renewed %.0fs ago; not renewing again for a media refusal",
+                    now - self._last_refresh,
+                )
+                return False
+            await self.async_refresh_token()
+            return True
 
     # -- discovery ------------------------------------------------------
 
@@ -311,11 +426,17 @@ class TapoCloudAccount:
         Capability probing is best-effort per camera: a camera that fails to
         answer still appears, so it can be shown as unavailable rather than
         vanishing from the dashboard.
+
+        Lens things of a multi-lens camera (see :class:`CameraInfo`) are never
+        probed — the cloud refuses passthrough to them — and are described
+        from their parent instead, with ``relay_device_id`` and ``channel`` set.
         """
         try:
             cameras = await self._session.cameras()
         except Exception as err:  # noqa: BLE001
             raise _map_error(err) from err
+
+        lenses = map_lenses([cam.device_id for cam in cameras])
 
         async def describe(cam: Any) -> CameraInfo:
             base = CameraInfo(
@@ -341,24 +462,71 @@ class TapoCloudAccount:
                 features=frozenset(summary.features),
             )
 
-        return list(await asyncio.gather(*(describe(cam) for cam in cameras)))
+        parents = [cam for cam in cameras if cam.device_id not in lenses]
+        described = {
+            info.device_id: info
+            for info in await asyncio.gather(*(describe(cam) for cam in parents))
+        }
+
+        result: list[CameraInfo] = []
+        for cam in cameras:
+            if cam.device_id not in lenses:
+                result.append(described[cam.device_id])
+                continue
+            parent_id, channel = lenses[cam.device_id]
+            parent = described.get(parent_id)
+            result.append(
+                CameraInfo(
+                    device_id=cam.device_id,
+                    name=cam.name or cam.model or cam.device_id,
+                    model=cam.model or (parent.model if parent else ""),
+                    app_server=cam.app_server,
+                    firmware=parent.firmware if parent else "",
+                    # Pan/tilt and the SD card belong to the parent device; which
+                    # lens the motor moves is not discoverable, so lenses offer
+                    # neither rather than guess.
+                    has_ptz=False,
+                    has_sd_card=False,
+                    relay_device_id=parent_id,
+                    channel=channel,
+                )
+            )
+
+        self._discovered = {info.device_id: info for info in result}
+        return result
 
     def camera(self, info: CameraInfo) -> TapoCloudCamera:
-        """A control handle for one discovered camera."""
-        return TapoCloudCamera(self, info)
+        """A control handle for one discovered camera (one per device id)."""
+        handle = self._handles.get(info.device_id)
+        if handle is None or handle.info != info:
+            handle = TapoCloudCamera(self, info)
+            self._handles[info.device_id] = handle
+        return handle
+
+    def parent_camera(self, info: CameraInfo) -> TapoCloudCamera | None:
+        """The parent camera's handle for a lens, or ``None`` if not a lens."""
+        if not info.is_lens:
+            return None
+        parent_info = self._discovered.get(info.relay_device_id) or CameraInfo(
+            device_id=info.relay_device_id,
+            name=info.name,
+            model=info.model,
+            app_server=info.app_server,
+        )
+        return self.camera(parent_info)
 
 
 class TapoCloudCamera:
-    """One camera, reached over the cloud relay."""
+    """One camera, or one lens of a multi-lens camera, reached over the relay."""
 
     def __init__(self, account: TapoCloudAccount, info: CameraInfo) -> None:
         self._account = account
         self._info = info
-        self._device = account.session.device(info.device_id, name=info.name)
-        # The relay fans one live stream out to many viewers, but our own
-        # negotiation is serialised so a dashboard opening two cards at once
-        # cannot race two relay requests for the same track id.
-        self._stream_lock = asyncio.Lock()
+        # Passthrough always targets the device the cloud will answer for: a
+        # lens thing's own id is refused ("doesn't belong to user's account").
+        self._device = account.session.device(info.stream_device_id, name=info.name)
+        self._poll_lock = asyncio.Lock()
+        self._last_poll: tuple[float, dict[str, Any]] | None = None
 
     @property
     def info(self) -> CameraInfo:
@@ -370,47 +538,131 @@ class TapoCloudCamera:
 
     # -- media ----------------------------------------------------------
 
-    def iter_live_ts(self, *, resolution: str = "HD") -> AsyncIterator[bytes]:
+    async def iter_live_ts(self, *, resolution: str = "HD") -> AsyncIterator[bytes]:
         """An async iterator of MPEG-TS chunks of the live view.
 
         Remote by construction: relay-negotiated, no LAN path to the camera.
+        A lens streams its parent device on its own channel. If the relay
+        refuses the token before any video arrives, the token is renewed once
+        (at most every :data:`TOKEN_REFRESH_MIN_INTERVAL` seconds, account-wide)
+        and the stream is retried; any other failure is raised as before.
         """
+        for attempt in (1, 2):
+            produced = False
+            try:
+                async for chunk in self._raw_live_ts(resolution):
+                    produced = True
+                    yield chunk
+                return
+            except Unauthorized:
+                if produced or attempt == 2:
+                    raise
+                if not await self._account.async_refresh_token_throttled():
+                    raise
+                _LOGGER.debug("relay refused the token for %s; renewed", self.device_id)
+
+    def _raw_live_ts(self, resolution: str) -> AsyncIterator[bytes]:
         return iter_live_ts(
-            self._account.session, self.device_id, resolution=resolution
+            self._account.session,
+            self._info.stream_device_id,
+            channel=self._info.channel,
+            resolution=resolution,
         )
 
-    async def async_snapshot(self, out_path: str, *, seconds: float = 4.0) -> str:
-        """Decode one still frame of the live view to ``out_path``.
+    async def async_snapshot(
+        self,
+        *,
+        ffmpeg: str = "ffmpeg",
+        seconds: float = 4.0,
+        resolution: str = "HD",
+        max_wait: float = 45.0,
+    ) -> bytes:
+        """Return one JPEG still of the live view (of this lens, for a lens).
 
-        The camera exposes no still-image endpoint, so OnTapo pulls a few
-        seconds of live video and decodes a frame with ffmpeg.
+        The camera has no still-image endpoint, so this collects about
+        ``seconds`` of live MPEG-TS from the relay on this camera's channel and
+        decodes one frame with ffmpeg. Video goes to ffmpeg over a pipe and the
+        JPEG comes back over a pipe: no temporary files, so no blocking file I/O
+        on the event loop.
+
+        A relay token refusal renews the token once, throttled account-wide,
+        and retries; any other error is raised as before.
+
+        Raises:
+            CloudAuthError: the relay refused the token, even after renewal (or
+                renewal was throttled).
+            CloudTransportError: the relay failed or produced no video.
+            RuntimeError: ffmpeg is missing or could not decode a frame.
         """
         try:
-            return await self._device.snapshot(out_path, seconds=seconds)
+            video = await self._collect_ts(seconds, resolution, max_wait)
         except Exception as err:  # noqa: BLE001
             mapped = _map_error(err)
             if not isinstance(mapped, CloudAuthError):
                 raise mapped from err
-        # The relay can refuse a token that the passthrough API still accepts,
-        # so renew it once and retry before giving up.
-        _LOGGER.debug("relay refused the token for %s; refreshing", self.device_id)
-        await self._account.async_refresh_token()
+            if not await self._account.async_refresh_token_throttled():
+                raise mapped from err
+            _LOGGER.debug("relay refused the token for %s; renewed", self.device_id)
+            try:
+                video = await self._collect_ts(seconds, resolution, max_wait)
+            except Exception as retry_err:  # noqa: BLE001
+                raise _map_error(retry_err) from retry_err
+        return await decode_first_frame(video, ffmpeg=ffmpeg)
+
+    async def _collect_ts(self, seconds: float, resolution: str, max_wait: float) -> bytes:
+        """Gather ``seconds`` of live video, timed from the first chunk."""
+        loop = asyncio.get_running_loop()
+        chunks: list[bytes] = []
+
+        async def gather() -> None:
+            deadline: float | None = None
+            stream = self._raw_live_ts(resolution)
+            try:
+                async for chunk in stream:
+                    chunks.append(chunk)
+                    if deadline is None:
+                        deadline = loop.time() + seconds
+                    if loop.time() >= deadline:
+                        break
+            finally:
+                await stream.aclose()  # type: ignore[attr-defined]
+
         try:
-            return await self._device.snapshot(out_path, seconds=seconds)
-        except Exception as err:  # noqa: BLE001
-            raise _map_error(err) from err
+            await asyncio.wait_for(gather(), timeout=max_wait)
+        except TimeoutError:
+            if not chunks:
+                raise RelayError("relay produced no video before timing out") from None
+        if not chunks:
+            raise RelayError("relay produced no video")
+        return b"".join(chunks)
 
     # -- state ----------------------------------------------------------
 
-    async def async_poll(self) -> dict[str, Any]:
+    async def async_poll(self, *, max_age: float = 0.0) -> dict[str, Any]:
         """Read the state this integration surfaces as entities.
 
         Each read is independent and best-effort: a camera model that lacks a
         feature answers ``-40101`` (``UnsupportedMethod``), which is recorded as
         ``None`` rather than failing the whole poll.
+
+        A lens never polls on its own: it returns its parent's state, reusing a
+        parent poll up to :data:`LENS_POLL_SHARE_SECONDS` old, so the parent is
+        not queried once per lens. ``max_age`` lets that reuse happen.
         """
+        parent = self._account.parent_camera(self._info)
+        if parent is not None:
+            return await parent.async_poll(max_age=LENS_POLL_SHARE_SECONDS)
+
+        async with self._poll_lock:
+            now = self._account._clock()
+            if self._last_poll is not None and now - self._last_poll[0] <= max_age:
+                return dict(self._last_poll[1])
+            state = await self._poll_device()
+            self._last_poll = (self._account._clock(), state)
+            return dict(state)
+
+    async def _poll_device(self) -> dict[str, Any]:
         state: dict[str, Any] = {"available": False}
-        info_errors: list[str] = []
 
         async def attempt(key: str, coro: Awaitable[Any]) -> None:
             try:
@@ -419,18 +671,10 @@ class TapoCloudCamera:
                 state[key] = None
             except (DeviceError, CloudError, OnTapoError) as err:
                 _LOGGER.debug("%s read failed for %s: %s", key, self.device_id, err)
-                if key == "device_info":
-                    info_errors.append(str(err))
                 state[key] = None
 
         await attempt("device_info", self._device.device_info())
         state["available"] = state.get("device_info") is not None
-        if not state["available"] and any("belong" in e for e in info_errors):
-            # A lens of a multi-lens camera (e.g. C545D) is listed by the cloud as
-            # its own thing, but passthrough to it is refused. Its video may still
-            # be reachable over the relay, so keep it available for snapshots.
-            state["available"] = True
-            return state
         if not state["available"]:
             return state
 

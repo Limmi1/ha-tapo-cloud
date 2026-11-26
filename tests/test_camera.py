@@ -8,7 +8,7 @@ from homeassistant.components.camera import async_get_image
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.tapo_cloud.api import CloudTransportError
+from custom_components.tapo_cloud.api import CloudAuthError, CloudTransportError
 from custom_components.tapo_cloud.const import (
     CONF_SNAPSHOT_INTERVAL,
     DOMAIN,
@@ -33,14 +33,8 @@ async def _setup(hass, entry_data, account, options=None):
 
 
 def _writes_jpeg(account, device_id, payload=JPEG):
-    """Make the camera's snapshot write a real file, as OnTapo's does."""
-
-    async def snapshot(path, seconds=4.0):
-        with open(path, "wb") as handle:
-            handle.write(payload)
-        return path
-
-    account.cameras[device_id].async_snapshot = AsyncMock(side_effect=snapshot)
+    """Make the camera handle's snapshot return JPEG bytes, as it now does."""
+    account.cameras[device_id].async_snapshot = AsyncMock(return_value=payload)
 
 
 async def test_snapshot_returns_a_decoded_frame(
@@ -96,28 +90,35 @@ async def test_a_failed_snapshot_serves_the_last_good_frame(
     assert stale.content == JPEG
 
 
-async def test_temporary_files_are_cleaned_up(
+async def test_an_auth_refusal_also_serves_the_last_good_frame(
     hass: HomeAssistant, entry_data, mock_account, ptz_camera_info
 ):
-    """No camera footage should be left behind on disk after a snapshot."""
-    await _setup(hass, entry_data, mock_account)
-    paths: list[str] = []
+    """A relay 401 that survives token renewal must not blank the card either."""
+    await _setup(hass, entry_data, mock_account, options={CONF_SNAPSHOT_INTERVAL: 0})
+    camera = mock_account.cameras[ptz_camera_info.device_id]
 
-    async def snapshot(path, seconds=4.0):
-        paths.append(path)
-        with open(path, "wb") as handle:
-            handle.write(JPEG)
-        return path
+    _writes_jpeg(mock_account, ptz_camera_info.device_id)
+    assert (await async_get_image(hass, "camera.garden")).content == JPEG
 
-    mock_account.cameras[ptz_camera_info.device_id].async_snapshot = AsyncMock(
-        side_effect=snapshot
-    )
-    await async_get_image(hass, "camera.garden")
+    camera.async_snapshot = AsyncMock(side_effect=CloudAuthError("relay 401"))
+    assert (await async_get_image(hass, "camera.garden")).content == JPEG
 
-    import os
 
-    assert paths
-    assert not any(os.path.exists(path) for path in paths)
+async def test_snapshot_uses_ha_ffmpeg_and_the_configured_quality(
+    hass: HomeAssistant, entry_data, mock_account, ptz_camera_info
+):
+    """The snapshot goes through HA's own ffmpeg binary, with no file paths."""
+    await _setup(hass, entry_data, mock_account, options={"resolution": "VGA"})
+    _writes_jpeg(mock_account, ptz_camera_info.device_id)
+
+    with patch("custom_components.tapo_cloud.camera.get_ffmpeg_manager") as manager:
+        manager.return_value.binary = "/opt/ffmpeg"
+        await async_get_image(hass, "camera.garden")
+
+    call = mock_account.cameras[ptz_camera_info.device_id].async_snapshot.await_args
+    assert call.args == ()
+    assert call.kwargs["ffmpeg"] == "/opt/ffmpeg"
+    assert call.kwargs["resolution"] == "VGA"
 
 
 async def test_the_entity_reports_the_configured_stream_quality(

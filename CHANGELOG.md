@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-11-26
+
+### Fixed
+
+- **Multi-lens cameras.** The cloud lists a dual-lens camera as a parent device
+  plus one device per lens (the parent's id with `00`, `01`, … appended), but
+  refuses both cloud calls and relay streams addressed to a lens. Lenses are
+  now recognised during discovery and streamed the way the Tapo app does it:
+  the **parent** device on the lens's **channel**. Each lens gets its own
+  picture, and two lenses no longer share a relay session.
+- A lens's availability, privacy and motion now come from its parent camera's
+  poll, and nothing is ever sent to a lens id. The parent is polled once, not
+  once per lens.
+- A relay that keeps refusing the token no longer renews it on every snapshot
+  of every card. Renewals for snapshots and live view are limited to one every
+  five minutes across the account, and renewals by the background poll count
+  towards that limit.
+- Snapshots no longer do blocking file I/O on Home Assistant's event loop.
+  Video now goes to ffmpeg and the JPEG comes back over pipes, with no
+  temporary files.
+- A token refusal during a snapshot now shows the last good frame instead of a
+  broken image.
+
+### Removed
+
+- The 0.1.1 workaround that marked lenses available when the cloud said they
+  didn't belong to the account. The lens mapping replaces it.
+
 ## [0.1.1] - 2026-11-26
 
 ### Fixed
@@ -43,5 +71,6 @@ All notable changes to this project are documented here. The format follows
   and the server reports refusals as HTTP 200, which looked like success.
 - Codes typed with a separator, such as `150-791`, were rejected.
 
+[0.1.2]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Limmi1/ha-tapo-cloud/releases/tag/v0.1.0

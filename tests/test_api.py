@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from ontapo import AuthError, CloudError, RelayError, Unauthorized, UnsupportedMethod
 
 from custom_components.tapo_cloud.api import (
+    LENS_POLL_SHARE_SECONDS,
+    TOKEN_REFRESH_MIN_INTERVAL,
     CameraInfo,
     CloudAuthError,
     CloudSetterRejected,
@@ -16,8 +19,12 @@ from custom_components.tapo_cloud.api import (
     SessionTokens,
     TapoCloudAccount,
     _map_error,
+    decode_first_frame,
+    map_lenses,
     redact,
 )
+
+API = "custom_components.tapo_cloud.api"
 
 
 def test_redact_hides_secrets_but_keeps_shape():
@@ -262,75 +269,309 @@ async def test_send_mfa_code_succeeds_on_a_clean_body():
     await async_send_mfa_code(session, "pw", mfa_type=2)  # no raise
 
 
-def _camera_with(device):
-    """A TapoCloudCamera over a mocked device, with a mockable token refresh."""
+
+# -- multi-lens cameras ------------------------------------------------------
+
+PARENT = "FAKEDEVICE0123456789"
+
+
+def test_map_lenses_finds_the_lenses_of_a_dual_lens_camera():
+    lenses = map_lenses([PARENT, PARENT + "00", PARENT + "01", "OTHERCAM"])
+    assert lenses == {PARENT + "00": (PARENT, 0), PARENT + "01": (PARENT, 1)}
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        ["CAMA", "CAMB"],  # unrelated cameras
+        [PARENT + "00"],  # lens-like id with no parent listed
+        [PARENT, PARENT + "0A"],  # suffix is not two digits
+        [PARENT, PARENT + "001"],  # three characters, not two
+        [PARENT, PARENT + "\u0661\u0662"],  # non-ASCII digits
+    ],
+)
+def test_map_lenses_leaves_ordinary_cameras_alone(ids):
+    assert map_lenses(ids) == {}
+
+
+def _thing(device_id, name, model="DUALLENS"):
+    return SimpleNamespace(device_id=device_id, name=name, model=model, app_server="aps1")
+
+
+async def test_discovery_describes_lenses_from_their_parent_without_probing_them():
     session = MagicMock()
+    session.cameras = AsyncMock(
+        return_value=[
+            _thing(PARENT, "Driveway"),
+            _thing(PARENT + "00", "Fixed Lens"),
+            _thing(PARENT + "01", "PT Lens"),
+        ]
+    )
+    summary = SimpleNamespace(
+        name="Driveway", model="DUALLENS", firmware="1.0.0",
+        has_ptz=True, has_sd_card=True, features=frozenset({"ptz"}),
+    )
+    device = MagicMock()
+    device.summary = AsyncMock(return_value=summary)
+    session.device.return_value = device
+
+    cameras = {c.device_id: c for c in await TapoCloudAccount(session).async_discover()}
+
+    # Only the parent is probed: passthrough to a lens id is refused by the cloud.
+    probed = [call.args[0] for call in session.device.call_args_list]
+    assert probed == [PARENT]
+
+    parent, fixed, pt = cameras[PARENT], cameras[PARENT + "00"], cameras[PARENT + "01"]
+    assert (parent.stream_device_id, parent.channel, parent.is_lens) == (PARENT, 0, False)
+    assert parent.has_ptz is True
+    assert (fixed.stream_device_id, fixed.channel, fixed.is_lens) == (PARENT, 0, True)
+    assert (pt.stream_device_id, pt.channel, pt.is_lens) == (PARENT, 1, True)
+    assert fixed.name == "Fixed Lens" and pt.firmware == "1.0.0"
+    # Motor and SD card belong to the parent device.
+    assert pt.has_ptz is False and pt.has_sd_card is False
+
+
+def _lens_info(channel):
+    return CameraInfo(
+        device_id=f"{PARENT}0{channel}", name=f"lens {channel}", model="DUALLENS",
+        app_server="aps1", relay_device_id=PARENT, channel=channel,
+    )
+
+
+def _parent_info():
+    return CameraInfo(device_id=PARENT, name="Driveway", model="DUALLENS", app_server="aps1")
+
+
+def test_a_lens_handle_never_targets_its_own_thing_id():
+    session = MagicMock()
+    TapoCloudAccount(session).camera(_lens_info(1))
+    assert session.device.call_args.args[0] == PARENT
+
+
+async def test_a_lens_reads_its_state_from_the_parents_poll():
+    session = MagicMock()
+    device = MagicMock()
+    device.device_info = AsyncMock(return_value={"device_model": "DUALLENS"})
+    device.get_privacy_mode = AsyncMock(return_value=True)
+    device.get_motion_detection = AsyncMock(return_value={"enabled": "on"})
     session.device.return_value = device
     account = TapoCloudAccount(session)
-    account.async_refresh_token = AsyncMock()
-    info = CameraInfo(device_id="D", name="n", model="m", app_server="a")
-    return account, account.camera(info)
+    account._discovered = {PARENT: _parent_info()}
+    parent = account.camera(_parent_info())
+    lens0, lens1 = account.camera(_lens_info(0)), account.camera(_lens_info(1))
+
+    parent_state = await parent.async_poll()
+    lens_states = [await lens0.async_poll(), await lens1.async_poll()]
+
+    assert all(state == parent_state for state in lens_states)
+    assert parent_state["available"] is True and parent_state["privacy_mode"] is True
+    # The two lenses reused the parent's fresh poll rather than querying again.
+    assert device.device_info.await_count == 1
+    # And every passthrough handle that was created points at the parent.
+    assert {call.args[0] for call in session.device.call_args_list} == {PARENT}
 
 
-async def test_snapshot_refreshes_the_token_once_when_the_relay_refuses_it():
-    """Passthrough can keep working while the relay returns 401; renew and retry."""
+async def test_a_stale_parent_poll_is_refreshed_for_a_lens():
+    session = MagicMock()
     device = MagicMock()
-    device.snapshot = AsyncMock(
-        side_effect=[Unauthorized("relay request unauthorized"), "/tmp/frame.jpg"]
+    device.device_info = AsyncMock(return_value={})
+    device.get_privacy_mode = AsyncMock(return_value=False)
+    device.get_motion_detection = AsyncMock(return_value={})
+    session.device.return_value = device
+    account = TapoCloudAccount(session)
+    now = [1000.0]
+    account._clock = lambda: now[0]
+    parent, lens = account.camera(_parent_info()), account.camera(_lens_info(1))
+
+    await parent.async_poll()
+    now[0] += LENS_POLL_SHARE_SECONDS + 1
+    await lens.async_poll()
+    assert device.device_info.await_count == 2
+
+
+async def test_a_lens_failure_is_not_masked_as_available_any_more():
+    """The 0.1.1 'doesn't belong' workaround is gone; real failures show as such."""
+    device = MagicMock()
+    device.device_info = AsyncMock(side_effect=CloudError("Thing doesn't belong to user's account"))
+    session = MagicMock()
+    session.device.return_value = device
+    state = await TapoCloudAccount(session).camera(_parent_info()).async_poll()
+    assert state["available"] is False
+
+
+# -- snapshots over the camera's own channel ----------------------------------
+
+def _stream_of(*chunks, error=None):
+    """A fake iter_live_ts that records its arguments."""
+    calls = []
+
+    def fake(session, device_id, *, channel=0, resolution="HD", idle_timeout=None):
+        calls.append({"device_id": device_id, "channel": channel, "resolution": resolution})
+
+        async def gen():
+            if error is not None:
+                raise error
+            for chunk in chunks:
+                yield chunk
+
+        return gen()
+
+    return fake, calls
+
+
+async def test_a_lens_snapshot_streams_the_parent_on_the_lens_channel():
+    fake, calls = _stream_of(b"\x47ts")
+    camera = TapoCloudAccount(MagicMock()).camera(_lens_info(1))
+    with (
+        patch(f"{API}.iter_live_ts", fake),
+        patch(f"{API}.decode_first_frame", AsyncMock(return_value=b"JPEG")) as decode,
+    ):
+        image = await camera.async_snapshot(ffmpeg="/opt/ffmpeg", seconds=0, resolution="VGA")
+
+    assert image == b"JPEG"
+    assert calls == [{"device_id": PARENT, "channel": 1, "resolution": "VGA"}]
+    decode.assert_awaited_once_with(b"\x47ts", ffmpeg="/opt/ffmpeg")
+
+
+async def test_snapshot_collects_seconds_of_video_before_decoding():
+    fake, _ = _stream_of(b"a", b"b", b"c")
+    camera = TapoCloudAccount(MagicMock()).camera(_parent_info())
+    with (
+        patch(f"{API}.iter_live_ts", fake),
+        patch(f"{API}.decode_first_frame", AsyncMock(return_value=b"J")) as decode,
+    ):
+        await camera.async_snapshot(seconds=60)
+    # The stream ended before 60 s, so everything received is decoded.
+    assert decode.await_args.args[0] == b"abc"
+
+
+async def test_snapshot_with_no_video_is_a_transport_error():
+    fake, _ = _stream_of()
+    camera = TapoCloudAccount(MagicMock()).camera(_parent_info())
+    with patch(f"{API}.iter_live_ts", fake), pytest.raises(CloudTransportError):
+        await camera.async_snapshot(seconds=0)
+
+
+# -- token refresh throttling ------------------------------------------------
+
+def _throttled_account():
+    session = MagicMock()
+    session.refresh = AsyncMock()
+    account = TapoCloudAccount(session)
+    now = [10_000.0]
+    account._clock = lambda: now[0]
+    return account, session, now
+
+
+async def test_snapshot_renews_the_token_once_after_a_relay_401():
+    account, session, _ = _throttled_account()
+    camera = account.camera(_parent_info())
+    attempts = iter([Unauthorized("relay request unauthorized"), None])
+
+    def fake(session_, device_id, **kwargs):
+        error = next(attempts)
+
+        async def gen():
+            if error:
+                raise error
+            yield b"ts"
+
+        return gen()
+
+    with (
+        patch(f"{API}.iter_live_ts", fake),
+        patch(f"{API}.decode_first_frame", AsyncMock(return_value=b"J")),
+    ):
+        assert await camera.async_snapshot(seconds=0) == b"J"
+    session.refresh.assert_awaited_once()
+
+
+async def test_a_permanent_401_renews_at_most_once_per_five_minutes():
+    """The 0.1.1 behaviour renewed on every snapshot of every card, every 30 s."""
+    account, session, now = _throttled_account()
+    camera = account.camera(_parent_info())
+    fake, _ = _stream_of(error=Unauthorized("relay request unauthorized"))
+
+    with patch(f"{API}.iter_live_ts", fake):
+        for _ in range(10):  # ten snapshots, 30 s apart: 4.5 minutes
+            with pytest.raises(CloudAuthError):
+                await camera.async_snapshot(seconds=0)
+            now[0] += 30
+        assert session.refresh.await_count == 1
+
+        now[0] += TOKEN_REFRESH_MIN_INTERVAL  # well past the window
+        with pytest.raises(CloudAuthError):
+            await camera.async_snapshot(seconds=0)
+        assert session.refresh.await_count == 2
+
+
+async def test_a_coordinator_renewal_counts_towards_the_throttle():
+    account, session, _ = _throttled_account()
+    await account.async_refresh_token()  # e.g. the polling coordinator
+    assert await account.async_refresh_token_throttled() is False
+    session.refresh.assert_awaited_once()
+
+
+async def test_snapshot_does_not_renew_for_errors_other_than_auth():
+    account, session, _ = _throttled_account()
+    camera = account.camera(_parent_info())
+    fake, _ = _stream_of(error=RelayError("relay down"))
+    with patch(f"{API}.iter_live_ts", fake), pytest.raises(CloudTransportError):
+        await camera.async_snapshot(seconds=0)
+    session.refresh.assert_not_awaited()
+
+
+async def test_the_live_stream_renews_once_then_streams():
+    account, session, _ = _throttled_account()
+    camera = account.camera(_lens_info(1))
+    attempts = iter([Unauthorized("relay request unauthorized"), None])
+
+    def fake(session_, device_id, **kwargs):
+        error = next(attempts)
+
+        async def gen():
+            if error:
+                raise error
+            yield b"live"
+
+        return gen()
+
+    with patch(f"{API}.iter_live_ts", fake):
+        chunks = [chunk async for chunk in camera.iter_live_ts()]
+    assert chunks == [b"live"]
+    session.refresh.assert_awaited_once()
+
+
+async def test_the_live_stream_respects_the_throttle():
+    account, session, _ = _throttled_account()
+    await account.async_refresh_token()  # renewed moments ago
+    camera = account.camera(_parent_info())
+    fake, _ = _stream_of(error=Unauthorized("relay request unauthorized"))
+    with patch(f"{API}.iter_live_ts", fake), pytest.raises(Unauthorized):
+        _ = [chunk async for chunk in camera.iter_live_ts()]
+    session.refresh.assert_awaited_once()  # only the earlier one
+
+
+async def test_decode_first_frame_with_real_ffmpeg():
+    """End to end through a real ffmpeg, when one is installed."""
+    import shutil
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg not installed")
+    make = await asyncio.create_subprocess_exec(
+        ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
+        "-t", "1", "-c:v", "libx264", "-f", "mpegts", "pipe:1",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    account, camera = _camera_with(device)
+    ts, _ = await make.communicate()
+    if make.returncode != 0 or not ts:
+        pytest.skip("this ffmpeg cannot encode a test stream")
 
-    assert await camera.async_snapshot("/tmp/frame.jpg") == "/tmp/frame.jpg"
-    account.async_refresh_token.assert_awaited_once()
-    assert device.snapshot.await_count == 2
-
-
-async def test_snapshot_does_not_refresh_for_errors_other_than_auth():
-    device = MagicMock()
-    device.snapshot = AsyncMock(side_effect=RelayError("relay down"))
-    account, camera = _camera_with(device)
-
-    with pytest.raises(CloudTransportError):
-        await camera.async_snapshot("/tmp/frame.jpg")
-    account.async_refresh_token.assert_not_awaited()
-    assert device.snapshot.await_count == 1
+    image = await decode_first_frame(ts, ffmpeg=ffmpeg)
+    assert image[:2] == b"\xff\xd8"  # a JPEG
 
 
-async def test_snapshot_gives_up_after_one_refresh():
-    """A second refusal after renewing is raised, not retried forever."""
-    device = MagicMock()
-    device.snapshot = AsyncMock(side_effect=Unauthorized("relay request unauthorized"))
-    account, camera = _camera_with(device)
-
-    with pytest.raises(CloudAuthError):
-        await camera.async_snapshot("/tmp/frame.jpg")
-    account.async_refresh_token.assert_awaited_once()
-    assert device.snapshot.await_count == 2
-
-
-async def test_poll_keeps_a_lens_the_cloud_will_not_passthrough_to_available():
-    """A multi-lens camera's lens things refuse passthrough but may still stream."""
-    device = MagicMock()
-    device.device_info = AsyncMock(
-        side_effect=CloudError("Thing doesn't belong to user's account")
-    )
-    device.get_privacy_mode = AsyncMock()
-    device.get_motion_detection = AsyncMock()
-    _, camera = _camera_with(device)
-
-    state = await camera.async_poll()
-
-    assert state["available"] is True
-    assert state["device_info"] is None
-    # It returns early: privacy and motion are left unknown, not queried.
-    device.get_privacy_mode.assert_not_awaited()
-    device.get_motion_detection.assert_not_awaited()
-    assert "privacy_mode" not in state
-
-
-async def test_poll_still_marks_other_device_info_failures_unavailable():
-    device = MagicMock()
-    device.device_info = AsyncMock(side_effect=CloudError("gateway timeout"))
-    _, camera = _camera_with(device)
-
-    assert (await camera.async_poll())["available"] is False
+async def test_decode_first_frame_reports_a_missing_ffmpeg():
+    with pytest.raises(RuntimeError, match="ffmpeg not found"):
+        await decode_first_frame(b"x", ffmpeg="/nonexistent/ffmpeg")
